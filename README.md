@@ -1,0 +1,56 @@
+# mumble-web-proxy
+
+mumble-web-proxy is a [Mumble] to WebSocket+WebRTC proxy.
+
+The Mumble protocol uses TCP for control and UDP for voice.
+This proxy bridges those to WebSocket for control and WebRTC for voice.
+
+While not limited to, its primary use-case is allowing [mumble-web] to connect to vanilla Mumble 1.2/1.3 servers.
+
+Note that it requires an extension to the Mumble protocol which has not yet been stabilized and as such may change at any time, so make sure to keep mumble-web and mumble-web-proxy in sync.
+
+### Installing
+
+#### Building
+For now, mumble-web-proxy must be built from source. Pre-built binaries may be provided at a later point in development.
+
+Make sure you have Cargo (Rust's package manager) installed (e.g. via [rustup](https://rustup.rs/)), then run:
+```
+git clone https://github.com/johni0702/mumble-web-proxy
+cd mumble-web-proxy
+cargo build --release
+```
+The final binary will be at `target/release/mumble-web-proxy`.
+
+#### Running
+
+mumble-web-proxy can only accept insecure websocket connections, so you will want to run it behind some web server which can terminate TLS. See [mumble-web]'s README for an example.
+
+Run `mumble-web-proxy --help` to see available options.
+E.g. if you want the proxy to listen on port `64737` and connect to your Mumble server at `mumbleserver:64738`, run:
+```
+mumble-web-proxy --listen-ws 64737 --server mumbleserver:64738
+```
+
+#### Firewalls or NAT
+Note: Not yet implemented.
+
+If your mumble-web-proxy is running behind a firewall or NAT, you need to allocate a range of ports to it which it can use for ICE connection establishment.
+```
+mumble-web-proxy --listen-ws 64737 --server mumbleserver:64738 --ice-start 20000 --ice-end 21000
+```
+For NATs, you additionally need to provide it with its publicly reachable IP address(es):
+```
+--ice-ipv4 1.2.3.4 --ice-ipv6 1:2:3:4:5::6
+```
+
+### License
+mumble-web-proxy is available under the terms of the GNU General Public License as published by the Free Software Foundation, either version 2 of the License, or (at your option) any later version.
+Additionally, it is available under the terms of the GNU Affero General Public License as published by the Free Software Foundation, either version 3 of the License, or (at your option) any later version.
+
+The GPLv2 is used because libnice.rs uses the GPLv2 which is not compatible with the AGPLv3.
+The AGPLv3 is used to allow dropping of the GPLv2 when/if libnice.rs is ever dropped.
+
+[Mumble]: https://wiki.mumble.info/wiki/Main_Page
+[mumble-web]: https://github.com/Johni0702/mumble-web/tree/webrtc
+[mumble-web-proxy]: https://github.com/johni0702/mumble-web-proxy

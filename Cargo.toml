@@ -1,0 +1,23 @@
+[package]
+name = "mumble-web-proxy"
+version = "0.1.0"
+authors = ["Jonas Herzig <me@johni0702.de>"]
+
+[build-dependencies]
+protobuf-codegen-pure = "2.0"
+
+[dependencies]
+argparse = "0.2.2"
+bytes = "0.4"
+byteorder = "1.2"
+futures = "0.1"
+tokio = "0.1"
+tokio-core = "0.1"
+tokio-codec = "0.1"
+tokio-tls = "0.1"
+native-tls = "0.1"
+protobuf = "2.0"
+websocket = "0.21.1"
+rtp = { git = "https://github.com/johni0702/rtp", rev = "0a8ec94", features = ["openssl", "tokio"] }
+nice = { git = "https://github.com/johni0702/libnice.rs", rev = "956d190" }
+openssl = "0.10"
