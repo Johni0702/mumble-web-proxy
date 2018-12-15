@@ -31,7 +31,7 @@ type SessionId = u32;
 
 struct User {
     session: u32,           // mumble session id
-    ssrc: u32,                // ssrc id
+    ssrc: u32,              // ssrc id
     active: bool,           // whether the user is currently transmitting audio
     timeout: Option<Delay>, // assume end of transmission if silent until then
     start_voice_seq_num: u64,
@@ -45,6 +45,12 @@ impl User {
 
         if self.active {
             self.active = false;
+
+            self.rtp_seq_num_offset = self
+                .rtp_seq_num_offset
+                .wrapping_add((self.highest_voice_seq_num - self.start_voice_seq_num) as u32 + 1);
+            self.start_voice_seq_num = 0;
+            self.highest_voice_seq_num = 0;
 
             let mut msg = Mumble::TalkingState::new();
             msg.set_session(self.session);
@@ -250,7 +256,7 @@ impl Connection {
             Some(t) => t,
             None => return EitherS::B(stream::empty()),
         };
-        let (sequence_id, buf) = match read_varint(buf) {
+        let (seq_num, buf) = match read_varint(buf) {
             Some(t) => t,
             None => return EitherS::B(stream::empty()),
         };
@@ -277,59 +283,63 @@ impl Connection {
         };
         let rtp_ssrc = user.ssrc;
 
-        let mut rtp_marker = if user.active {
+        let mut first_in_transmission = if user.active {
             false
         } else {
-            user.start_voice_seq_num = sequence_id;
-            user.highest_voice_seq_num = sequence_id;
+            user.start_voice_seq_num = seq_num;
+            user.highest_voice_seq_num = seq_num;
             true
         };
 
-        let activity_stream = if last_bit && sequence_id > user.start_voice_seq_num {
+        let offset = seq_num - user.start_voice_seq_num;
+        let mut rtp_seq_num = user.rtp_seq_num_offset + offset as u32;
+
+        let activity_stream = if last_bit {
+            if seq_num <= user.highest_voice_seq_num {
+                // Horribly delayed end packet from a previous stream, just drop it
+                // (or single packet stream which would be inaudible anyway)
+                return EitherS::B(stream::empty());
+            }
             // this is the last packet of this voice transmission -> reset counters
             // doing that will effectively trash any delayed packets but that's just
             // a flaw in the mumble protocol and there's nothing we can do about it.
             EitherS::B(user.set_inactive())
-        } else if sequence_id >= user.highest_voice_seq_num
-            && sequence_id + 100 < user.highest_voice_seq_num
-        {
-            // probably same voice transmission (also not too far in the future)
-            user.highest_voice_seq_num = sequence_id;
-            EitherS::A(user.set_active(target))
-        } else if user.highest_voice_seq_num > sequence_id + 100 {
-            // Either significant jitter (>2s) or we missed the end of the last
-            // transmission. Since >2s jitter will break opus horribly anyway,
-            // we assume the latter and start a new transmission
-            user.rtp_seq_num_offset = user
-                .rtp_seq_num_offset
-                .wrapping_add((user.highest_voice_seq_num - user.start_voice_seq_num) as u32)
-                .wrapping_add(1);
-            user.start_voice_seq_num = sequence_id;
-            user.highest_voice_seq_num = sequence_id;
-            rtp_marker = true;
-            EitherS::A(user.set_active(target))
         } else {
-            EitherS::A(user.set_active(target))
+            EitherS::A(
+                if seq_num == user.highest_voice_seq_num && seq_num != user.start_voice_seq_num {
+                    // re-transmission, drop it
+                    return EitherS::B(stream::empty());
+                } else if seq_num >= user.highest_voice_seq_num
+                    && seq_num < user.highest_voice_seq_num + 100
+                {
+                    // probably same voice transmission (also not too far in the future)
+                    user.highest_voice_seq_num = seq_num;
+                    EitherS::A(user.set_active(target))
+                } else if seq_num < user.highest_voice_seq_num
+                    && seq_num + 100 > user.highest_voice_seq_num
+                {
+                    // slightly delayed but probably same voice transmission
+                    EitherS::A(user.set_active(target))
+                } else {
+                    // Either significant jitter (>2s) or we missed the end of the last
+                    // transmission. Since >2s jitter will break opus horribly anyway,
+                    // we assume the latter and start a new transmission
+                    let stream = user.set_inactive();
+                    first_in_transmission = true;
+                    user.start_voice_seq_num = seq_num;
+                    user.highest_voice_seq_num = seq_num;
+                    rtp_seq_num = user.rtp_seq_num_offset;
+                    EitherS::B(stream.chain(user.set_active(target)))
+                },
+            )
         };
-
-        let offset = sequence_id - user.start_voice_seq_num;
-        let rtp_seq_num = user.rtp_seq_num_offset + offset as u32;
-
-        if !user.active {
-            user.rtp_seq_num_offset = user
-                .rtp_seq_num_offset
-                .wrapping_add((sequence_id - user.start_voice_seq_num) as u32)
-                .wrapping_add(1);
-            user.start_voice_seq_num = 0;
-            user.highest_voice_seq_num = 0;
-        }
 
         let rtp_time = 480 * rtp_seq_num;
 
         let rtp = RtpPacket {
             header: RtpFixedHeader {
                 padding: false,
-                marker: rtp_marker,
+                marker: first_in_transmission,
                 payload_type: 97,
                 seq_num: rtp_seq_num as u16,
                 timestamp: rtp_time as u32,
