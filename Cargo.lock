@@ -386,7 +386,7 @@ dependencies = [
  "openssl 0.10.15 (registry+https://github.com/rust-lang/crates.io-index)",
  "protobuf 2.2.0 (registry+https://github.com/rust-lang/crates.io-index)",
  "protobuf-codegen-pure 2.2.0 (registry+https://github.com/rust-lang/crates.io-index)",
- "rtp 0.1.0 (git+https://github.com/johni0702/rtp?rev=0a8ec94)",
+ "rtp 0.1.0 (git+https://github.com/johni0702/rtp?rev=ee8be93)",
  "tokio 0.1.13 (registry+https://github.com/rust-lang/crates.io-index)",
  "tokio-codec 0.1.1 (registry+https://github.com/rust-lang/crates.io-index)",
  "tokio-core 0.1.17 (registry+https://github.com/rust-lang/crates.io-index)",
@@ -766,7 +766,7 @@ dependencies = [
 [[package]]
 name = "rtp"
 version = "0.1.0"
-source = "git+https://github.com/johni0702/rtp?rev=0a8ec94#0a8ec94f7dbcf91dfd92f02aed868eb839a6a3c1"
+source = "git+https://github.com/johni0702/rtp?rev=ee8be93#ee8be938555a47957b5813a9453d5b4954badc08"
 dependencies = [
  "fixedbitset 0.1.9 (registry+https://github.com/rust-lang/crates.io-index)",
  "handy_async 0.2.13 (registry+https://github.com/rust-lang/crates.io-index)",
@@ -1371,7 +1371,7 @@ dependencies = [
 "checksum regex 0.1.80 (registry+https://github.com/rust-lang/crates.io-index)" = "4fd4ace6a8cf7860714a2c2280d6c1f7e6a413486c13298bbc86fd3da019402f"
 "checksum regex-syntax 0.3.9 (registry+https://github.com/rust-lang/crates.io-index)" = "f9ec002c35e86791825ed294b50008eea9ddfc8def4420124fbc6b08db834957"
 "checksum remove_dir_all 0.5.1 (registry+https://github.com/rust-lang/crates.io-index)" = "3488ba1b9a2084d38645c4c08276a1752dcbf2c7130d74f1569681ad5d2799c5"
-"checksum rtp 0.1.0 (git+https://github.com/johni0702/rtp?rev=0a8ec94)" = "<none>"
+"checksum rtp 0.1.0 (git+https://github.com/johni0702/rtp?rev=ee8be93)" = "<none>"
 "checksum rust-crypto 0.2.36 (registry+https://github.com/rust-lang/crates.io-index)" = "f76d05d3993fd5f4af9434e8e436db163a12a9d40e1a58a726f27a01dfd12a2a"
 "checksum rustc-serialize 0.3.24 (registry+https://github.com/rust-lang/crates.io-index)" = "dcf128d1287d2ea9d80910b5f1120d0b8eede3fbf1abe91c40d39ea7d51e6fda"
 "checksum rustc_version 0.2.3 (registry+https://github.com/rust-lang/crates.io-index)" = "138e3e0acb6c9fb258b19b67cb8abd63c00679d2851805ea151465464fe9030a"

@@ -18,6 +18,6 @@ tokio-tls = "0.1"
 native-tls = "0.1"
 protobuf = "2.0"
 websocket = "0.21.1"
-rtp = { git = "https://github.com/johni0702/rtp", rev = "0a8ec94", features = ["openssl", "tokio"] }
+rtp = { git = "https://github.com/johni0702/rtp", rev = "ee8be93", features = ["openssl", "tokio"] }
 nice = { git = "https://github.com/johni0702/libnice.rs", rev = "956d190" }
 openssl = "0.10"
