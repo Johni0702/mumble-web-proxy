@@ -19,13 +19,13 @@ use argparse::{ArgumentParser, Store};
 use byteorder::{BigEndian, ByteOrder};
 use bytes::{BufMut, BytesMut};
 use futures::{Future, Sink, Stream};
-use native_tls::TlsConnector;
+use std::convert::Into;
 use std::net::ToSocketAddrs;
 use tokio::net::TcpStream;
 use tokio::prelude::*;
 use tokio_codec::Decoder;
 use tokio_core::reactor::Core;
-use tokio_tls::TlsConnectorExt;
+use tokio_tls::TlsConnector;
 use websocket::async::Server;
 use websocket::message::OwnedMessage;
 use websocket::server::InvalidConnection;
@@ -94,12 +94,12 @@ fn main() {
                 .accept()
                 .from_err()
                 .join(server_sock.from_err().and_then(move |stream| {
-                    let connector: TlsConnector = TlsConnector::builder()
-                        .unwrap()
+                    let connector: TlsConnector = native_tls::TlsConnector::builder()
                         //.danger_accept_invalid_certs(true)
                         .build()
-                        .unwrap();
-                    connector.connect_async(upstream_host, stream).from_err()
+                        .unwrap()
+                        .into();
+                    connector.connect(upstream_host, stream).from_err()
                 }))
                 .and_then(move |((client, _), server)| {
                     let (client_sink, client_stream) = client.split();
