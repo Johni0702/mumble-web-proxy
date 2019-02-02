@@ -45,11 +45,7 @@ For NATs, you additionally need to provide it with its publicly reachable IP add
 ```
 
 ### License
-mumble-web-proxy is available under the terms of the GNU General Public License as published by the Free Software Foundation, either version 2 of the License, or (at your option) any later version.
-Additionally, it is available under the terms of the GNU Affero General Public License as published by the Free Software Foundation, either version 3 of the License, or (at your option) any later version.
-
-The GPLv2 is used because libnice.rs uses the GPLv2 which is not compatible with the AGPLv3.
-The AGPLv3 is used to allow dropping of the GPLv2 when/if libnice.rs is ever dropped.
+mumble-web-proxy is available under the terms of the GNU Affero General Public License as published by the Free Software Foundation, either version 3 of the License, or (at your option) any later version.
 
 [Mumble]: https://wiki.mumble.info/wiki/Main_Page
 [mumble-web]: https://github.com/Johni0702/mumble-web/tree/webrtc

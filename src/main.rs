@@ -4,8 +4,8 @@ extern crate argparse;
 extern crate byteorder;
 extern crate bytes;
 extern crate futures;
+extern crate libnice;
 extern crate native_tls;
-extern crate nice;
 extern crate openssl;
 extern crate protobuf;
 extern crate rtp;
@@ -13,6 +13,7 @@ extern crate tokio;
 extern crate tokio_codec;
 extern crate tokio_core;
 extern crate tokio_tls;
+extern crate webrtc_sdp;
 extern crate websocket;
 
 use argparse::{ArgumentParser, Store};
@@ -22,7 +23,6 @@ use futures::{Future, Sink, Stream};
 use std::convert::Into;
 use std::net::ToSocketAddrs;
 use tokio::net::TcpStream;
-use tokio::prelude::*;
 use tokio_codec::Decoder;
 use tokio_core::reactor::Core;
 use tokio_tls::TlsConnector;
@@ -32,7 +32,6 @@ use websocket::server::InvalidConnection;
 
 mod connection;
 mod error;
-mod ice;
 mod mumble;
 mod utils;
 mod protos {

@@ -1,5 +1,6 @@
 use futures::stream;
 use futures::{Future, Sink, Stream};
+use libnice::ice;
 use openssl::asn1::Asn1Time;
 use openssl::hash::MessageDigest;
 use openssl::pkey::{PKey, Private};
@@ -15,13 +16,14 @@ use rtp::rfc5761::{MuxPacketReader, MuxPacketWriter, MuxedPacket};
 use rtp::rfc5764::{DtlsSrtp, DtlsSrtpHandshakeResult};
 use rtp::traits::{ReadPacket, WritePacket};
 use std::collections::BTreeMap;
+use std::ffi::CString;
 use std::time::{Duration, Instant};
 use tokio::io;
 use tokio::prelude::*;
 use tokio::timer::Delay;
+use webrtc_sdp::attribute_type::SdpAttribute;
 
 use error::Error;
-use ice::{IceAgent, IceStream};
 use mumble;
 use mumble::MumbleFrame;
 use protos::Mumble;
@@ -93,11 +95,10 @@ pub struct Connection {
     next_rtp_frame: Option<Vec<u8>>,
     stream_to_be_sent: Option<Box<Stream<Item = Frame, Error = Error>>>,
 
-    ice_future: Option<Box<Future<Item = (IceAgent, IceStream), Error = Error>>>,
-    ice: Option<IceAgent>,
+    ice: Option<(ice::Agent, ice::Stream)>,
 
-    dtls_srtp_future: Option<DtlsSrtpHandshakeResult<IceStream, SslAcceptorBuilder>>,
-    dtls_srtp: Option<DtlsSrtp<IceStream, SslAcceptorBuilder>>,
+    dtls_srtp_future: Option<DtlsSrtpHandshakeResult<ice::StreamComponent, SslAcceptorBuilder>>,
+    dtls_srtp: Option<DtlsSrtp<ice::StreamComponent, SslAcceptorBuilder>>,
     dtls_key: PKey<Private>,
     dtls_cert: X509,
 
@@ -146,7 +147,6 @@ impl Connection {
             next_serverbound_frame: None,
             next_rtp_frame: None,
             stream_to_be_sent: None,
-            ice_future: None,
             ice: None,
             dtls_srtp_future: None,
             dtls_srtp: None,
@@ -190,11 +190,20 @@ impl Connection {
         }
     }
 
-    fn setup_ice(
-        &mut self,
-        agent: IceAgent,
-        stream: IceStream,
-    ) -> impl Stream<Item = Frame, Error = Error> {
+    fn setup_ice(&mut self) -> impl Stream<Item = Frame, Error = Error> {
+        // Setup ICE agent
+        let mut agent = ice::Agent::new_rfc5245();
+        agent.set_software("mumble-web-proxy");
+
+        // Setup ICE stream
+        let mut stream = match agent.stream_builder(1).build() {
+            Ok(stream) => stream,
+            Err(err) => {
+                return stream::once(Err(io::Error::new(io::ErrorKind::Other, err).into()));
+            }
+        };
+        let component = stream.take_components().pop().expect("one component");
+
         // Send WebRTC details to the client
         let mut msg = Mumble::WebRTC::new();
         msg.set_dtls_fingerprint(
@@ -206,40 +215,24 @@ impl Connection {
                 .collect::<Vec<_>>()
                 .join(":"),
         );
-        msg.set_ice_pwd(agent.pwd().to_owned());
-        msg.set_ice_ufrag(agent.ufrag().to_owned());
-        let webrtc_msg = Frame::Client(MumbleFrame {
+        msg.set_ice_pwd(stream.get_local_pwd().to_owned());
+        msg.set_ice_ufrag(stream.get_local_ufrag().to_owned());
+        let webrtc_msg = MumbleFrame {
             id: mumble::MSG_WEBRTC,
             bytes: msg.write_to_bytes().unwrap().into(),
-        });
+        };
 
-        // Parse ICE candidates and send them to the client
-        let candidate_msgs = agent
-            .sdp()
-            .lines()
-            .filter(|line| line.starts_with("a=candidate"))
-            .map(|line| line[2..].to_owned())
-            .map(move |candidate| {
-                let mut msg = Mumble::IceCandidate::new();
-                msg.set_content(candidate);
-                Frame::Client(MumbleFrame {
-                    id: mumble::MSG_ICE_CANDIDATE,
-                    bytes: msg.write_to_bytes().unwrap().into(),
-                })
-            })
-            .collect::<Vec<Frame>>();
-
-        // Store ice agent for later use
-        self.ice = Some(agent);
+        // Store ice agent and stream for later use
+        self.ice = Some((agent, stream));
 
         // Prepare to accept the DTLS connection
         let mut acceptor = SslAcceptor::mozilla_modern(SslMethod::dtls()).unwrap();
         acceptor.set_certificate(&self.dtls_cert).unwrap();
         acceptor.set_private_key(&self.dtls_key).unwrap();
         // FIXME: verify remote fingerprint
-        self.dtls_srtp_future = Some(DtlsSrtp::handshake(stream, acceptor));
+        self.dtls_srtp_future = Some(DtlsSrtp::handshake(component, acceptor));
 
-        stream::iter_ok(Some(webrtc_msg).into_iter().chain(candidate_msgs))
+        stream::once(Ok(Frame::Client(webrtc_msg)))
     }
 
     fn handle_voice_packet(&mut self, buf: &[u8]) -> impl Stream<Item = Frame, Error = Error> {
@@ -384,7 +377,7 @@ impl Connection {
     fn process_packet_from_client(
         &mut self,
         mut frame: MumbleFrame,
-    ) -> impl Stream<Item = Frame, Error = Error> {
+    ) -> Box<Stream<Item = Frame, Error = Error>> {
         match frame.id {
             mumble::MSG_AUTHENTICATE => {
                 let mut message: Mumble::Authenticate =
@@ -396,52 +389,50 @@ impl Connection {
                     // and make sure opus is marked as supported
                     message.set_opus(true);
 
-                    self.ice_future = Some(Box::new(IceAgent::bind()));
-                }
+                    let stream = self.setup_ice();
 
-                frame.bytes = message.write_to_bytes().unwrap().as_slice().into();
-                EitherS::A(EitherS::A(stream::once(Ok(Frame::Server(frame)))))
+                    frame.bytes = message.write_to_bytes().unwrap().as_slice().into();
+                    Box::new(stream::once(Ok(Frame::Server(frame))).chain(stream))
+                } else {
+                    Box::new(stream::once(Ok(Frame::Server(frame))))
+                }
             }
             mumble::MSG_WEBRTC => {
                 let mut message: Mumble::WebRTC = protobuf::parse_from_bytes(&frame.bytes).unwrap();
                 println!("Got WebRTC: {:?}", message);
-                if let Some(ref mut agent) = self.ice {
-                    let f1 = agent.set_remote_pwd(message.take_ice_pwd());
-                    let f2 = agent.set_remote_ufrag(message.take_ice_ufrag());
+                if let Some((_, stream)) = &mut self.ice {
+                    if let (Ok(ufrag), Ok(pwd)) = (
+                        CString::new(message.take_ice_ufrag()),
+                        CString::new(message.take_ice_pwd()),
+                    ) {
+                        stream.set_remote_credentials(ufrag, pwd);
+                    }
                     // FIXME trigger ICE-restart if required
                     // FIXME store and use remote dtls fingerprint
-                    EitherS::B(EitherS::A(
-                        f1.join(f2)
-                            .map(|_| stream::empty())
-                            .map_err(|_| {
-                                io::Error::new(io::ErrorKind::Other, "failed to set ice creds")
-                            })
-                            .from_err()
-                            .flatten_stream(),
-                    ))
-                } else {
-                    EitherS::A(EitherS::B(stream::empty()))
                 }
+                Box::new(stream::empty())
             }
             mumble::MSG_ICE_CANDIDATE => {
                 let mut message: Mumble::IceCandidate =
                     protobuf::parse_from_bytes(&frame.bytes).unwrap();
                 let candidate = message.take_content();
                 println!("Got ice candidate: {:?}", candidate);
-                if let Some(ref mut agent) = self.ice {
-                    EitherS::B(EitherS::B(
-                        agent
-                            .add_remote_ice_candidate(candidate)
-                            .map(|_| stream::empty())
-                            .map_err(|_| {
-                                io::Error::new(io::ErrorKind::Other, "failed to add ice candidate")
-                            })
-                            .from_err()
-                            .flatten_stream(),
-                    ))
-                } else {
-                    EitherS::A(EitherS::B(stream::empty()))
+                if let Some((_, stream)) = &mut self.ice {
+                    match format!("candidate:{}", candidate).parse() {
+                        Ok(SdpAttribute::Candidate(candidate)) => {
+                            stream.add_remote_candidate(candidate)
+                        }
+                        Ok(_) => unreachable!(),
+                        Err(err) => {
+                            return Box::new(stream::once(Err(io::Error::new(
+                                io::ErrorKind::Other,
+                                format!("Error parsing ICE candidate: {}", err),
+                            )
+                            .into())));
+                        }
+                    }
                 }
+                Box::new(stream::empty())
             }
             mumble::MSG_TALKING_STATE => {
                 let mut message: Mumble::TalkingState =
@@ -451,9 +442,9 @@ impl Connection {
                 } else {
                     None
                 };
-                EitherS::A(EitherS::B(stream::empty()))
+                Box::new(stream::empty())
             }
-            _ => EitherS::A(EitherS::A(stream::once(Ok(Frame::Server(frame))))),
+            _ => Box::new(stream::once(Ok(Frame::Server(frame)))),
         }
     }
 
@@ -492,6 +483,10 @@ impl Future for Connection {
 
     fn poll(&mut self) -> Poll<(), Error> {
         'poll: loop {
+            if let Some((agent, _)) = &mut self.ice {
+                agent.poll()?;
+            }
+
             // If there's a frame pending to be sent, sent it before everything else
             if let Some(frame) = self.next_serverbound_frame.take() {
                 match self.outbound_server.start_send(frame)? {
@@ -570,20 +565,20 @@ impl Future for Connection {
                 }
             }
 
-            // Poll ice future if required
-            if self.ice_future.is_some() {
-                if let Async::Ready((agent, stream)) = self.ice_future.as_mut().unwrap().poll()? {
-                    self.ice_future = None;
-
-                    println!("ICE ready.");
-
-                    let stream = self.setup_ice(agent, stream);
-                    self.stream_to_be_sent = Some(Box::new(stream));
+            // Poll ice stream for new candidates
+            if let Some((_, stream)) = &mut self.ice {
+                if let Async::Ready(Some(candidate)) = stream.poll()? {
+                    let candidate = format!("candidate:{}", candidate.to_string());
+                    println!("Local ice candidate: {}", candidate);
+                    // Got a new candidate, send it to the client
+                    let mut msg = Mumble::IceCandidate::new();
+                    msg.set_content(candidate.to_string());
+                    let frame = Frame::Client(MumbleFrame {
+                        id: mumble::MSG_ICE_CANDIDATE,
+                        bytes: msg.write_to_bytes().unwrap().into(),
+                    });
+                    self.stream_to_be_sent = Some(Box::new(stream::once(Ok(frame))));
                     continue 'poll;
-                } else {
-                    // wait for ice before processing futher packets to ensure
-                    // that the WebRTC init message isn't sent too late
-                    return Ok(Async::NotReady);
                 }
             }
 
