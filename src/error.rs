@@ -8,7 +8,6 @@ pub enum Error {
     Io(std::io::Error),
     ServerTls(native_tls::Error),
     ClientConnection(websocket::result::WebSocketError),
-    Protobuf(protobuf::ProtobufError),
     Misc(Box<std::error::Error>),
 }
 
@@ -27,12 +26,6 @@ impl From<std::io::Error> for Error {
 impl From<native_tls::Error> for Error {
     fn from(e: native_tls::Error) -> Self {
         Error::ServerTls(e)
-    }
-}
-
-impl From<protobuf::ProtobufError> for Error {
-    fn from(e: protobuf::ProtobufError) -> Self {
-        Error::Protobuf(e)
     }
 }
 

@@ -1,3 +1,4 @@
+#![feature(try_from)]
 // FIXME don't just unwrap protobuf results
 // FIXME for some reason, reconnecting without reloading the page fails DTLS handshake (FF)
 extern crate argparse;
@@ -5,9 +6,9 @@ extern crate byteorder;
 extern crate bytes;
 extern crate futures;
 extern crate libnice;
+extern crate mumble_protocol;
 extern crate native_tls;
 extern crate openssl;
-extern crate protobuf;
 extern crate rtp;
 extern crate tokio;
 extern crate tokio_codec;
@@ -20,7 +21,12 @@ use argparse::{ArgumentParser, Store};
 use byteorder::{BigEndian, ByteOrder};
 use bytes::{BufMut, BytesMut};
 use futures::{Future, Sink, Stream};
+use mumble_protocol::control::ClientControlCodec;
+use mumble_protocol::control::ControlPacket;
+use mumble_protocol::control::RawControlPacket;
+use mumble_protocol::Clientbound;
 use std::convert::Into;
+use std::convert::TryInto;
 use std::net::ToSocketAddrs;
 use tokio::net::TcpStream;
 use tokio_codec::Decoder;
@@ -32,14 +38,9 @@ use websocket::server::InvalidConnection;
 
 mod connection;
 mod error;
-mod mumble;
 mod utils;
-mod protos {
-    pub mod Mumble;
-}
 use connection::Connection;
 use error::Error;
-use mumble::{MumbleCodec, MumbleFrame};
 
 fn main() {
     let mut ws_port = 0_u16;
@@ -104,31 +105,35 @@ fn main() {
                     let (client_sink, client_stream) = client.split();
                     // buffered client sink to prevent temporary lag on the control
                     // channel from lagging the otherwise independent audio channel
-                    let client_sink = client_sink.buffer(10).with(|m: MumbleFrame| {
-                        let bytes = &m.bytes;
-                        let len = bytes.len();
-                        let mut buf = BytesMut::with_capacity(6 + len);
-                        buf.put_u16_be(m.id);
-                        buf.put_u32_be(len as u32);
-                        buf.put(bytes);
-                        Ok::<OwnedMessage, Error>(OwnedMessage::Binary(buf.freeze().to_vec()))
-                    });
+                    let client_sink =
+                        client_sink
+                            .buffer(10)
+                            .with(|m: ControlPacket<Clientbound>| {
+                                let m = RawControlPacket::from(m);
+                                let bytes = &m.bytes;
+                                let len = bytes.len();
+                                let mut buf = BytesMut::with_capacity(6 + len);
+                                buf.put_u16_be(m.id);
+                                buf.put_u32_be(len as u32);
+                                buf.put(bytes);
+                                Ok::<OwnedMessage, Error>(OwnedMessage::Binary(
+                                    buf.freeze().to_vec(),
+                                ))
+                            });
                     let client_stream = client_stream
                         .from_err()
                         .take_while(|m| Ok(!m.is_close()))
-                        .filter_map(|m| {
-                            match m {
-                                OwnedMessage::Binary(ref b) if b.len() >= 6 => {
-                                    let id = BigEndian::read_u16(b);
-                                    // b[2..6] is length which is implicit in websocket msgs
-                                    let bytes = b[6..].into();
-                                    Some(MumbleFrame { id, bytes })
-                                }
-                                _ => None,
+                        .filter_map(|m| match m {
+                            OwnedMessage::Binary(ref b) if b.len() >= 6 => {
+                                let id = BigEndian::read_u16(b);
+                                // b[2..6] is length which is implicit in websocket msgs
+                                let bytes = b[6..].into();
+                                RawControlPacket { id, bytes }.try_into().ok()
                             }
+                            _ => None,
                         });
 
-                    let server = MumbleCodec::new().framed(server);
+                    let server = ClientControlCodec::new().framed(server);
                     let (server_sink, server_stream) = server.split();
                     let server_sink = server_sink.sink_from_err();
                     let server_stream = server_stream.from_err();
@@ -142,48 +147,3 @@ fn main() {
         });
     core.run(f).unwrap();
 }
-
-macro_rules! define_packet_mappings {
-    ( $id:expr, $head:ident ) => {
-        #[allow(dead_code)]
-        const $head: u16 = $id;
-    };
-    ( $id:expr, $head:ident, $( $tail:ident ),* ) => {
-        #[allow(dead_code)]
-        const $head: u16 = $id;
-        define_packet_mappings!($id + 1, $($tail),*);
-    };
-}
-
-define_packet_mappings![
-    0,
-    MSG_VERSION,
-    MSG_UDP_TUNNEL,
-    MSG_AUTHENTICATE,
-    MSG_PING,
-    MSG_REJECT,
-    MSG_SERVER_SYNC,
-    MSG_CHANNEL_REMOVE,
-    MSG_CHANNEL_STATE,
-    MSG_USER_REMOVE,
-    MSG_USER_STATE,
-    MSG_BAN_LIST,
-    MSG_TEXT_MESSAGE,
-    MSG_PERMISSION_DENIED,
-    MSG_ACL,
-    MSG_QUERY_USERS,
-    MSG_CRYPT_SETUP,
-    MSG_CONTEXT_ACTION_MODIFY,
-    MSG_CONTEXT_ACTION,
-    MSG_USER_LIST,
-    MSG_VOICE_TARGET,
-    MSG_PERMISSION_QUERY,
-    MSG_CODEC_VERSION,
-    MSG_USER_STATS,
-    MSG_REQUEST_BLOB,
-    MSG_SERVER_CONFIG,
-    MSG_SUGGEST_CONFIG,
-    MSG_WEBRTC,
-    MSG_ICE_CANDIDATE,
-    MSG_TALKING_STATE
-];

@@ -1,13 +1,18 @@
 use futures::stream;
 use futures::{Future, Sink, Stream};
 use libnice::ice;
+use mumble_protocol::control::msgs;
+use mumble_protocol::control::ControlPacket;
+use mumble_protocol::voice::VoicePacket;
+use mumble_protocol::voice::VoicePacketPayload;
+use mumble_protocol::Clientbound;
+use mumble_protocol::Serverbound;
 use openssl::asn1::Asn1Time;
 use openssl::hash::MessageDigest;
 use openssl::pkey::{PKey, Private};
 use openssl::rsa::Rsa;
 use openssl::ssl::{SslAcceptor, SslAcceptorBuilder, SslMethod};
 use openssl::x509::X509;
-use protobuf::Message;
 use rtp::rfc3550::{
     RtcpCompoundPacket, RtcpPacket, RtcpPacketReader, RtcpPacketWriter, RtpFixedHeader, RtpPacket,
     RtpPacketReader, RtpPacketWriter,
@@ -24,10 +29,7 @@ use tokio::timer::Delay;
 use webrtc_sdp::attribute_type::SdpAttribute;
 
 use error::Error;
-use mumble;
-use mumble::MumbleFrame;
-use protos::Mumble;
-use utils::{read_varint, write_varint32, EitherS};
+use utils::EitherS;
 
 type SessionId = u32;
 
@@ -54,12 +56,9 @@ impl User {
             self.start_voice_seq_num = 0;
             self.highest_voice_seq_num = 0;
 
-            let mut msg = Mumble::TalkingState::new();
+            let mut msg = msgs::TalkingState::new();
             msg.set_session(self.session);
-            EitherS::A(stream::once(Ok(Frame::Client(MumbleFrame {
-                id: mumble::MSG_TALKING_STATE,
-                bytes: msg.write_to_bytes().unwrap().into(),
-            }))))
+            EitherS::A(stream::once(Ok(Frame::Client(msg.into()))))
         } else {
             EitherS::B(stream::empty())
         }
@@ -74,24 +73,21 @@ impl User {
         } else {
             self.active = true;
 
-            let mut msg = Mumble::TalkingState::new();
+            let mut msg = msgs::TalkingState::new();
             msg.set_session(self.session);
             msg.set_target(target.into());
-            EitherS::B(stream::once(Ok(Frame::Client(MumbleFrame {
-                id: mumble::MSG_TALKING_STATE,
-                bytes: msg.write_to_bytes().unwrap().into(),
-            }))))
+            EitherS::B(stream::once(Ok(Frame::Client(msg.into()))))
         }
     }
 }
 
 pub struct Connection {
-    inbound_client: Box<Stream<Item = MumbleFrame, Error = Error>>,
-    outbound_client: Box<Sink<SinkItem = MumbleFrame, SinkError = Error>>,
-    inbound_server: Box<Stream<Item = MumbleFrame, Error = Error>>,
-    outbound_server: Box<Sink<SinkItem = MumbleFrame, SinkError = Error>>,
-    next_clientbound_frame: Option<MumbleFrame>,
-    next_serverbound_frame: Option<MumbleFrame>,
+    inbound_client: Box<Stream<Item = ControlPacket<Serverbound>, Error = Error>>,
+    outbound_client: Box<Sink<SinkItem = ControlPacket<Clientbound>, SinkError = Error>>,
+    inbound_server: Box<Stream<Item = ControlPacket<Clientbound>, Error = Error>>,
+    outbound_server: Box<Sink<SinkItem = ControlPacket<Serverbound>, SinkError = Error>>,
+    next_clientbound_frame: Option<ControlPacket<Clientbound>>,
+    next_serverbound_frame: Option<ControlPacket<Serverbound>>,
     next_rtp_frame: Option<Vec<u8>>,
     stream_to_be_sent: Option<Box<Stream<Item = Frame, Error = Error>>>,
 
@@ -119,10 +115,10 @@ impl Connection {
         server_stream: SSt,
     ) -> Self
     where
-        CSi: Sink<SinkItem = MumbleFrame, SinkError = Error> + 'static,
-        CSt: Stream<Item = MumbleFrame, Error = Error> + 'static,
-        SSi: Sink<SinkItem = MumbleFrame, SinkError = Error> + 'static,
-        SSt: Stream<Item = MumbleFrame, Error = Error> + 'static,
+        CSi: Sink<SinkItem = ControlPacket<Clientbound>, SinkError = Error> + 'static,
+        CSt: Stream<Item = ControlPacket<Serverbound>, Error = Error> + 'static,
+        SSi: Sink<SinkItem = ControlPacket<Serverbound>, SinkError = Error> + 'static,
+        SSt: Stream<Item = ControlPacket<Clientbound>, Error = Error> + 'static,
     {
         let rsa = Rsa::generate(2048).unwrap();
         let key = PKey::from_rsa(rsa).unwrap();
@@ -205,7 +201,7 @@ impl Connection {
         let component = stream.take_components().pop().expect("one component");
 
         // Send WebRTC details to the client
-        let mut msg = Mumble::WebRTC::new();
+        let mut msg = msgs::WebRTC::new();
         msg.set_dtls_fingerprint(
             self.dtls_cert
                 .digest(MessageDigest::sha256())
@@ -217,10 +213,6 @@ impl Connection {
         );
         msg.set_ice_pwd(stream.get_local_pwd().to_owned());
         msg.set_ice_ufrag(stream.get_local_ufrag().to_owned());
-        let webrtc_msg = MumbleFrame {
-            id: mumble::MSG_WEBRTC,
-            bytes: msg.write_to_bytes().unwrap().into(),
-        };
 
         // Store ice agent and stream for later use
         self.ice = Some((agent, stream));
@@ -232,37 +224,23 @@ impl Connection {
         // FIXME: verify remote fingerprint
         self.dtls_srtp_future = Some(DtlsSrtp::handshake(component, acceptor));
 
-        stream::once(Ok(Frame::Client(webrtc_msg)))
+        stream::once(Ok(Frame::Client(msg.into())))
     }
 
-    fn handle_voice_packet(&mut self, buf: &[u8]) -> impl Stream<Item = Frame, Error = Error> {
-        let (header, buf) = match buf.split_first() {
-            Some(t) => t,
-            None => return EitherS::B(stream::empty()),
+    fn handle_voice_packet(
+        &mut self,
+        packet: VoicePacket<Clientbound>,
+    ) -> impl Stream<Item = Frame, Error = Error> {
+        let (target, session_id, seq_num, opus_data, last_bit) = match packet {
+            VoicePacket::Audio {
+                target,
+                session_id,
+                seq_num,
+                payload: VoicePacketPayload::Opus(data, last_bit),
+                ..
+            } => (target, session_id, seq_num, data, last_bit),
+            _ => return EitherS::B(stream::empty()),
         };
-        if (header >> 5_u8) != 4_u8 {
-            // only opus
-            return EitherS::B(stream::empty());
-        }
-        let target = header & 0x1f;
-        let (session_id, buf) = match read_varint(buf) {
-            Some(t) => t,
-            None => return EitherS::B(stream::empty()),
-        };
-        let (seq_num, buf) = match read_varint(buf) {
-            Some(t) => t,
-            None => return EitherS::B(stream::empty()),
-        };
-        let (opus_header, buf) = match read_varint(buf) {
-            Some(t) => t,
-            None => return EitherS::B(stream::empty()),
-        };
-        let length = (opus_header & 0x1fff) as usize;
-        let last_bit = opus_header & 0x2000 != 0;
-        if length > buf.len() {
-            return EitherS::B(stream::empty());
-        }
-        let (opus_data, _) = buf.split_at(length);
 
         // NOTE: the mumble packet id increases by 1 per 10ms of audio contained
         // whereas rtp seq_num should increase by 1 per packet, regardless of audio,
@@ -349,39 +327,32 @@ impl Connection {
 
     fn process_packet_from_server(
         &mut self,
-        mut frame: MumbleFrame,
+        packet: ControlPacket<Clientbound>,
     ) -> impl Stream<Item = Frame, Error = Error> {
-        match frame.id {
-            mumble::MSG_UDP_TUNNEL => EitherS::A(self.handle_voice_packet(&frame.bytes)),
-            mumble::MSG_USER_STATE => {
-                let mut message: Mumble::UserState =
-                    protobuf::parse_from_bytes(&frame.bytes).unwrap();
+        match packet {
+            ControlPacket::UDPTunnel(voice) => EitherS::A(self.handle_voice_packet(*voice)),
+            ControlPacket::UserState(mut message) => {
                 let session_id = message.get_session();
                 if !self.sessions.contains_key(&session_id) {
                     let user = self.allocate_ssrc(session_id);
                     message.set_ssrc(user.ssrc);
                 }
-                frame.bytes = message.write_to_bytes().unwrap().as_slice().into();
-                EitherS::B(stream::once(Ok(Frame::Client(frame))))
+                EitherS::B(stream::once(Ok(Frame::Client((*message).into()))))
             }
-            mumble::MSG_USER_REMOVE => {
-                let mut message: Mumble::UserRemove =
-                    protobuf::parse_from_bytes(&frame.bytes).unwrap();
+            ControlPacket::UserRemove(message) => {
                 self.free_ssrc(message.get_session());
-                EitherS::B(stream::once(Ok(Frame::Client(frame))))
+                EitherS::B(stream::once(Ok(Frame::Client((*message).into()))))
             }
-            _ => EitherS::B(stream::once(Ok(Frame::Client(frame)))),
+            other => EitherS::B(stream::once(Ok(Frame::Client(other)))),
         }
     }
 
     fn process_packet_from_client(
         &mut self,
-        mut frame: MumbleFrame,
+        packet: ControlPacket<Serverbound>,
     ) -> Box<Stream<Item = Frame, Error = Error>> {
-        match frame.id {
-            mumble::MSG_AUTHENTICATE => {
-                let mut message: Mumble::Authenticate =
-                    protobuf::parse_from_bytes(&frame.bytes).unwrap();
+        match packet {
+            ControlPacket::Authenticate(mut message) => {
                 println!("MSG Authenticate: {:?}", message);
                 if message.get_webrtc() {
                     // strip webrtc support from the connection (we will be providing it)
@@ -391,14 +362,12 @@ impl Connection {
 
                     let stream = self.setup_ice();
 
-                    frame.bytes = message.write_to_bytes().unwrap().as_slice().into();
-                    Box::new(stream::once(Ok(Frame::Server(frame))).chain(stream))
+                    Box::new(stream::once(Ok(Frame::Server((*message).into()))).chain(stream))
                 } else {
-                    Box::new(stream::once(Ok(Frame::Server(frame))))
+                    Box::new(stream::once(Ok(Frame::Server((*message).into()))))
                 }
             }
-            mumble::MSG_WEBRTC => {
-                let mut message: Mumble::WebRTC = protobuf::parse_from_bytes(&frame.bytes).unwrap();
+            ControlPacket::WebRTC(mut message) => {
                 println!("Got WebRTC: {:?}", message);
                 if let Some((_, stream)) = &mut self.ice {
                     if let (Ok(ufrag), Ok(pwd)) = (
@@ -412,9 +381,7 @@ impl Connection {
                 }
                 Box::new(stream::empty())
             }
-            mumble::MSG_ICE_CANDIDATE => {
-                let mut message: Mumble::IceCandidate =
-                    protobuf::parse_from_bytes(&frame.bytes).unwrap();
+            ControlPacket::IceCandidate(mut message) => {
                 let candidate = message.take_content();
                 println!("Got ice candidate: {:?}", candidate);
                 if let Some((_, stream)) = &mut self.ice {
@@ -434,9 +401,7 @@ impl Connection {
                 }
                 Box::new(stream::empty())
             }
-            mumble::MSG_TALKING_STATE => {
-                let mut message: Mumble::TalkingState =
-                    protobuf::parse_from_bytes(&frame.bytes).unwrap();
+            ControlPacket::TalkingState(message) => {
                 self.target = if message.has_target() {
                     Some(message.get_target() as u8)
                 } else {
@@ -444,7 +409,7 @@ impl Connection {
                 };
                 Box::new(stream::empty())
             }
-            _ => Box::new(stream::once(Ok(Frame::Server(frame)))),
+            other => Box::new(stream::once(Ok(Frame::Server(other)))),
         }
     }
 
@@ -456,17 +421,16 @@ impl Connection {
                     // packet reordering and loss (done). But maybe keep it low?
                     let seq_num = rtp.header.timestamp / 480;
 
-                    let header = 128_u8 | target;
-                    let mut vec: Vec<u8> = Vec::new();
-                    vec.push(header);
-                    write_varint32(&mut vec, seq_num as u32).unwrap();
-                    write_varint32(&mut vec, rtp.payload.len() as u32).unwrap();
-                    vec.extend(rtp.payload);
+                    let voice_packet = VoicePacket::Audio {
+                        _dst: std::marker::PhantomData::<Serverbound>,
+                        target,
+                        session_id: (),
+                        seq_num: seq_num.into(),
+                        payload: VoicePacketPayload::Opus(rtp.payload.into(), false),
+                        position_info: None,
+                    };
 
-                    Some(Ok(Frame::Server(MumbleFrame {
-                        id: mumble::MSG_UDP_TUNNEL,
-                        bytes: vec.into(),
-                    })))
+                    Some(Ok(Frame::Server(voice_packet.into())))
                 } else {
                     None
                 }
@@ -571,12 +535,9 @@ impl Future for Connection {
                     let candidate = format!("candidate:{}", candidate.to_string());
                     println!("Local ice candidate: {}", candidate);
                     // Got a new candidate, send it to the client
-                    let mut msg = Mumble::IceCandidate::new();
+                    let mut msg = msgs::IceCandidate::new();
                     msg.set_content(candidate.to_string());
-                    let frame = Frame::Client(MumbleFrame {
-                        id: mumble::MSG_ICE_CANDIDATE,
-                        bytes: msg.write_to_bytes().unwrap().into(),
-                    });
+                    let frame = Frame::Client(msg.into());
                     self.stream_to_be_sent = Some(Box::new(stream::once(Ok(frame))));
                     continue 'poll;
                 }
@@ -632,7 +593,7 @@ impl Future for Connection {
 
 #[derive(Clone)]
 enum Frame {
-    Server(MumbleFrame),
-    Client(MumbleFrame),
+    Server(ControlPacket<Serverbound>),
+    Client(ControlPacket<Clientbound>),
     Rtp(MuxedPacket<RtpPacket, RtcpCompoundPacket<RtcpPacket>>),
 }
