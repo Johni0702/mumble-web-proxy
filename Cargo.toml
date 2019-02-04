@@ -14,7 +14,8 @@ tokio-codec = "0.1"
 tokio-tls = "0.2"
 native-tls = "0.2"
 mumble-protocol = { version = "0.1", features = ["webrtc-extensions"] }
-websocket = "0.21.1"
+tokio-tungstenite = "0.6"
+tungstenite = "0.6"
 rtp = { git = "https://github.com/johni0702/rtp", rev = "ee8be93", features = ["openssl", "tokio"] }
 libnice = "0.1"
 webrtc-sdp = "0.1"

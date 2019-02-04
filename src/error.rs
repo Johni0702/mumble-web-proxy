@@ -1,5 +1,4 @@
 use futures::sync::mpsc;
-use websocket;
 
 // FIXME clean this up
 
@@ -7,12 +6,21 @@ use websocket;
 pub enum Error {
     Io(std::io::Error),
     ServerTls(native_tls::Error),
-    ClientConnection(websocket::result::WebSocketError),
+    ClientConnection(tungstenite::Error),
     Misc(Box<std::error::Error>),
 }
 
-impl From<websocket::result::WebSocketError> for Error {
-    fn from(e: websocket::result::WebSocketError) -> Self {
+impl Error {
+    pub fn is_connection_closed(&self) -> bool {
+        match self {
+            Error::ClientConnection(tungstenite::Error::ConnectionClosed(_)) => true,
+            _ => false,
+        }
+    }
+}
+
+impl From<tungstenite::Error> for Error {
+    fn from(e: tungstenite::Error) -> Self {
         Error::ClientConnection(e)
     }
 }
