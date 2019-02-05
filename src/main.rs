@@ -18,6 +18,7 @@ extern crate tokio_tungstenite;
 extern crate tungstenite;
 extern crate webrtc_sdp;
 
+use argparse::StoreTrue;
 use argparse::{ArgumentParser, Store};
 use byteorder::{BigEndian, ByteOrder};
 use bytes::{Buf, BufMut, BytesMut, IntoBuf};
@@ -49,6 +50,7 @@ use error::Error;
 fn main() {
     let mut ws_port = 0_u16;
     let mut upstream = "".to_string();
+    let mut accept_invalid_certs = false;
 
     {
         let mut ap = ArgumentParser::new();
@@ -67,6 +69,12 @@ fn main() {
                 "Hostname and port of upstream mumble server",
             )
             .required();
+        ap.refer(&mut accept_invalid_certs).add_option(
+            &["--accept-invalid-certificate"],
+            StoreTrue,
+            "Connect to upstream server even when its certificate is invalid.
+                 Only ever use this if know that your server is using a self-signed certificate!",
+        );
         ap.parse_args_or_exit();
     }
 
@@ -97,7 +105,7 @@ fn main() {
             .from_err()
             .and_then(move |stream| {
                 let connector: TlsConnector = native_tls::TlsConnector::builder()
-                    //.danger_accept_invalid_certs(true)
+                    .danger_accept_invalid_certs(accept_invalid_certs)
                     .build()
                     .unwrap()
                     .into();
