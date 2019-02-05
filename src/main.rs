@@ -35,7 +35,8 @@ use tokio::net::TcpStream;
 use tokio_codec::Decoder;
 use tokio_core::reactor::Core;
 use tokio_tls::TlsConnector;
-use tokio_tungstenite::accept_async_with_config;
+use tokio_tungstenite::accept_hdr_async_with_config;
+use tungstenite::handshake::server::Request;
 use tungstenite::protocol::Message;
 use tungstenite::protocol::WebSocketConfig;
 
@@ -110,7 +111,16 @@ fn main() {
             max_message_size: Some(0x7f_ffff), // maximum size accepted by Murmur
             max_frame_size: Some(0x7f_ffff), // maximum size accepted by Murmur
         };
-        let client = accept_async_with_config(client, Some(websocket_config)).from_err();
+        fn header_callback(
+            _req: &Request,
+        ) -> tungstenite::error::Result<Option<Vec<(String, String)>>> {
+            Ok(Some(vec![(
+                "Sec-WebSocket-Protocol".to_string(),
+                "binary".to_string(),
+            )]))
+        }
+        let client = accept_hdr_async_with_config(client, header_callback, Some(websocket_config))
+            .from_err();
 
         // Once both are done, begin proxy duty
         let f = client
