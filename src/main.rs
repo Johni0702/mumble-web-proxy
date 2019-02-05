@@ -66,7 +66,7 @@ fn main() {
             .add_option(
                 &["--server"],
                 Store,
-                "Hostname and port of upstream mumble server",
+                "Hostname and (optionally) port of the upstream Mumble server",
             )
             .required();
         ap.refer(&mut accept_invalid_certs).add_option(
@@ -78,13 +78,19 @@ fn main() {
         ap.parse_args_or_exit();
     }
 
-    let mut upstream_parts = upstream.rsplitn(2, ':');
-    let upstream_port: u16 = upstream_parts
-        .next()
-        .expect("Missing upstream port")
-        .parse()
-        .expect("Failed to parse upstream port");
-    let upstream_host = upstream_parts.next().expect("Missing upstream host name");
+    // Try parsing as raw IPv6 address first
+    let (upstream_host, upstream_port) = match upstream.parse::<Ipv6Addr>() {
+        Ok(_) => (upstream.as_ref(), 64738),
+        Err(_) => {
+            // Otherwise split off port from end
+            let mut upstream_parts = upstream.rsplitn(2, ':');
+            let right = upstream_parts.next().expect("Empty upstream address");
+            match upstream_parts.next() {
+                Some(host) => (host, right.parse().expect("Failed to parse upstream port")),
+                None => (right, 64738),
+            }
+        }
+    };
     let upstream_host = Box::leak(Box::new(upstream_host.to_owned())).as_str();
     let upstream_addr = (upstream_host, upstream_port)
         .to_socket_addrs()
