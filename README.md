@@ -11,6 +11,12 @@ Note that it requires an extension to the Mumble protocol which has not yet been
 
 ### Installing
 
+#### Prerequisites
+
+- Moderately recent Rust Nightly (e.g. via [rustup](https://rustup.rs/))
+- libnice development headers (`libnice-devel` on Fedora, `libnice-dev` on Debian)
+- clang (`clang` on Fedora and Debian)
+
 #### Building
 For now, mumble-web-proxy must be built from source. Pre-built binaries may be provided at a later point in development.
 
