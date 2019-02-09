@@ -229,7 +229,7 @@ impl Connection {
         self.ice = Some((agent, stream));
 
         // Prepare to accept the DTLS connection
-        let mut acceptor = SslAcceptor::mozilla_modern(SslMethod::dtls()).unwrap();
+        let mut acceptor = SslAcceptor::mozilla_intermediate(SslMethod::dtls()).unwrap();
         acceptor.set_certificate(&self.dtls_cert).unwrap();
         acceptor.set_private_key(&self.dtls_key).unwrap();
         // FIXME: verify remote fingerprint
