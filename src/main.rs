@@ -19,6 +19,7 @@ extern crate tokio_tungstenite;
 extern crate tungstenite;
 extern crate webrtc_sdp;
 
+use argparse::StoreOption;
 use argparse::StoreTrue;
 use argparse::{ArgumentParser, Store};
 use byteorder::{BigEndian, ByteOrder};
@@ -30,6 +31,7 @@ use mumble_protocol::control::RawControlPacket;
 use mumble_protocol::Clientbound;
 use std::convert::Into;
 use std::convert::TryInto;
+use std::net::Ipv4Addr;
 use std::net::Ipv6Addr;
 use std::net::ToSocketAddrs;
 use tokio::net::TcpListener;
@@ -48,10 +50,24 @@ mod utils;
 use connection::Connection;
 use error::Error;
 
+#[derive(Debug, Clone)]
+pub struct Config {
+    pub min_port: u16,
+    pub max_port: u16,
+    pub public_v4: Option<Ipv4Addr>,
+    pub public_v6: Option<Ipv6Addr>,
+}
+
 fn main() {
     let mut ws_port = 0_u16;
     let mut upstream = "".to_string();
     let mut accept_invalid_certs = false;
+    let mut config = Config {
+        min_port: 1,
+        max_port: u16::max_value(),
+        public_v4: None,
+        public_v6: None,
+    };
 
     {
         let mut ap = ArgumentParser::new();
@@ -75,6 +91,26 @@ fn main() {
             StoreTrue,
             "Connect to upstream server even when its certificate is invalid.
                  Only ever use this if know that your server is using a self-signed certificate!",
+        );
+        ap.refer(&mut config.min_port).add_option(
+            &["--ice-port-min"],
+            Store,
+            "Minimum port number to use for ICE host candidates.",
+        );
+        ap.refer(&mut config.max_port).add_option(
+            &["--ice-port-max"],
+            Store,
+            "Maximum port number to use for ICE host candidates.",
+        );
+        ap.refer(&mut config.public_v4).add_option(
+            &["--ice-ipv4"],
+            StoreOption,
+            "Set a public IPv4 address to be used for ICE host candidates.",
+        );
+        ap.refer(&mut config.public_v6).add_option(
+            &["--ice-ipv6"],
+            StoreOption,
+            "Set a public IPv6 address to be used for ICE host candidates.",
         );
         ap.parse_args_or_exit();
     }
@@ -138,6 +174,7 @@ fn main() {
             .from_err();
 
         // Once both are done, begin proxy duty
+        let config = config.clone();
         let f = client
             .join(server)
             .and_then(move |(client, server)| {
@@ -164,7 +201,13 @@ fn main() {
                 let server_sink = server_sink.sink_from_err();
                 let server_stream = server_stream.from_err();
 
-                Connection::new(client_sink, client_stream, server_sink, server_stream)
+                Connection::new(
+                    config,
+                    client_sink,
+                    client_stream,
+                    server_sink,
+                    server_stream,
+                )
             })
             .or_else(move |err| {
                 if err.is_connection_closed() {

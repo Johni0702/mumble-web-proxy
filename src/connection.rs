@@ -22,6 +22,7 @@ use rtp::rfc5764::{DtlsSrtp, DtlsSrtpHandshakeResult};
 use rtp::traits::{ReadPacket, WritePacket};
 use std::collections::BTreeMap;
 use std::ffi::CString;
+use std::net::IpAddr;
 use std::time::{Duration, Instant};
 use tokio::io;
 use tokio::prelude::*;
@@ -30,6 +31,7 @@ use webrtc_sdp::attribute_type::SdpAttribute;
 
 use error::Error;
 use utils::EitherS;
+use Config;
 
 type SessionId = u32;
 
@@ -82,6 +84,7 @@ impl User {
 }
 
 pub struct Connection {
+    config: Config,
     inbound_client: Box<Stream<Item = ControlPacket<Serverbound>, Error = Error>>,
     outbound_client: Box<Sink<SinkItem = ControlPacket<Clientbound>, SinkError = Error>>,
     inbound_server: Box<Stream<Item = ControlPacket<Clientbound>, Error = Error>>,
@@ -109,6 +112,7 @@ pub struct Connection {
 
 impl Connection {
     pub fn new<CSi, CSt, SSi, SSt>(
+        config: Config,
         client_sink: CSi,
         client_stream: CSt,
         server_sink: SSi,
@@ -135,6 +139,7 @@ impl Connection {
         let cert = cert_builder.build();
 
         Self {
+            config,
             inbound_client: Box::new(client_stream),
             outbound_client: Box::new(client_sink),
             inbound_server: Box::new(server_stream),
@@ -192,7 +197,13 @@ impl Connection {
         agent.set_software("mumble-web-proxy");
 
         // Setup ICE stream
-        let mut stream = match agent.stream_builder(1).build() {
+        let mut stream = match {
+            let mut builder = agent.stream_builder(1);
+            if self.config.min_port != 1 || self.config.max_port != u16::max_value() {
+                builder.set_port_range(self.config.min_port, self.config.max_port);
+            }
+            builder.build()
+        } {
             Ok(stream) => stream,
             Err(err) => {
                 return stream::once(Err(io::Error::new(io::ErrorKind::Other, err).into()));
@@ -531,12 +542,24 @@ impl Future for Connection {
 
             // Poll ice stream for new candidates
             if let Some((_, stream)) = &mut self.ice {
-                if let Async::Ready(Some(candidate)) = stream.poll()? {
-                    let candidate = format!("candidate:{}", candidate.to_string());
-                    println!("Local ice candidate: {}", candidate);
+                if let Async::Ready(Some(mut candidate)) = stream.poll()? {
+                    println!("Local ice candidate: {}", candidate.to_string());
+
+                    // Map to public addresses (if configured)
+                    let config = &self.config;
+                    match (&mut candidate.address, config.public_v4, config.public_v6) {
+                        (IpAddr::V4(addr), Some(public), _) => {
+                            *addr = public;
+                        }
+                        (IpAddr::V6(addr), _, Some(public)) => {
+                            *addr = public;
+                        }
+                        _ => {} // non configured
+                    };
+
                     // Got a new candidate, send it to the client
                     let mut msg = msgs::IceCandidate::new();
-                    msg.set_content(candidate.to_string());
+                    msg.set_content(format!("candidate:{}", candidate.to_string()));
                     let frame = Frame::Client(msg.into());
                     self.stream_to_be_sent = Some(Box::new(stream::once(Ok(frame))));
                     continue 'poll;

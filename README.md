@@ -39,11 +39,9 @@ mumble-web-proxy --listen-ws 64737 --server mumbleserver:64738
 ```
 
 #### Firewalls or NAT
-Note: Not yet implemented.
-
 If your mumble-web-proxy is running behind a firewall or NAT, you need to allocate a range of ports to it which it can use for ICE connection establishment.
 ```
-mumble-web-proxy --listen-ws 64737 --server mumbleserver:64738 --ice-start 20000 --ice-end 21000
+mumble-web-proxy --listen-ws 64737 --server mumbleserver:64738 --ice-port-min 20000 --ice-port-max 21000
 ```
 For NATs, you additionally need to provide it with its publicly reachable IP address(es):
 ```
