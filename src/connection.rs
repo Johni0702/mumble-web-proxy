@@ -195,6 +195,7 @@ impl Connection {
         // Setup ICE agent
         let mut agent = ice::Agent::new_rfc5245();
         agent.set_software("mumble-web-proxy");
+        agent.set_controlling_mode(true);
 
         // Setup ICE stream
         let mut stream = match {
