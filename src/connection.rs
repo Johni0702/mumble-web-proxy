@@ -162,6 +162,10 @@ impl Connection {
         }
     }
 
+    fn supports_webrtc(&self) -> bool {
+        self.ice.is_some()
+    }
+
     fn allocate_ssrc(&mut self, session_id: SessionId) -> &mut User {
         let ssrc = self.free_ssrcs.pop().unwrap_or_else(|| {
             let ssrc = self.next_ssrc;
@@ -341,6 +345,9 @@ impl Connection {
         &mut self,
         packet: ControlPacket<Clientbound>,
     ) -> impl Stream<Item = Frame, Error = Error> {
+        if !self.supports_webrtc() {
+            return EitherS::B(stream::once(Ok(Frame::Client(packet))));
+        }
         match packet {
             ControlPacket::UDPTunnel(voice) => EitherS::A(self.handle_voice_packet(*voice)),
             ControlPacket::UserState(mut message) => {
