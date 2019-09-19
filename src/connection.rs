@@ -23,6 +23,7 @@ use rtp::traits::{ReadPacket, WritePacket};
 use std::collections::BTreeMap;
 use std::ffi::CString;
 use std::time::{Duration, Instant};
+use std::rc::Rc;
 use tokio::io;
 use tokio::prelude::*;
 use tokio::timer::Delay;
@@ -81,15 +82,29 @@ impl User {
     }
 }
 
+pub struct ConnectionSettings {
+    pub ice_port_start: u16,
+    pub ice_port_end: u16,
+}
+
+impl ConnectionSettings {
+    pub fn new() -> Self {
+      Self {
+          ice_port_start: 0,
+          ice_port_end: 0,
+      }
+    }
+}
+
 pub struct Connection {
-    inbound_client: Box<Stream<Item = ControlPacket<Serverbound>, Error = Error>>,
-    outbound_client: Box<Sink<SinkItem = ControlPacket<Clientbound>, SinkError = Error>>,
-    inbound_server: Box<Stream<Item = ControlPacket<Clientbound>, Error = Error>>,
-    outbound_server: Box<Sink<SinkItem = ControlPacket<Serverbound>, SinkError = Error>>,
+    inbound_client: Box<dyn Stream<Item = ControlPacket<Serverbound>, Error = Error>>,
+    outbound_client: Box<dyn Sink<SinkItem = ControlPacket<Clientbound>, SinkError = Error>>,
+    inbound_server: Box<dyn Stream<Item = ControlPacket<Clientbound>, Error = Error>>,
+    outbound_server: Box<dyn Sink<SinkItem = ControlPacket<Serverbound>, SinkError = Error>>,
     next_clientbound_frame: Option<ControlPacket<Clientbound>>,
     next_serverbound_frame: Option<ControlPacket<Serverbound>>,
     next_rtp_frame: Option<Vec<u8>>,
-    stream_to_be_sent: Option<Box<Stream<Item = Frame, Error = Error>>>,
+    stream_to_be_sent: Option<Box<dyn Stream<Item = Frame, Error = Error>>>,
 
     ice: Option<(ice::Agent, ice::Stream)>,
 
@@ -105,6 +120,8 @@ pub struct Connection {
     next_ssrc: u32,
     free_ssrcs: Vec<u32>,
     sessions: BTreeMap<SessionId, User>,
+
+    settings: Rc<ConnectionSettings>,
 }
 
 impl Connection {
@@ -113,6 +130,7 @@ impl Connection {
         client_stream: CSt,
         server_sink: SSi,
         server_stream: SSt,
+        settings: Rc<ConnectionSettings>,
     ) -> Self
     where
         CSi: Sink<SinkItem = ControlPacket<Clientbound>, SinkError = Error> + 'static,
@@ -154,6 +172,7 @@ impl Connection {
             next_ssrc: 1,
             free_ssrcs: Vec::new(),
             sessions: BTreeMap::new(),
+            settings: settings,
         }
     }
 
@@ -192,7 +211,9 @@ impl Connection {
         agent.set_software("mumble-web-proxy");
 
         // Setup ICE stream
-        let mut stream = match agent.stream_builder(1).build() {
+        let mut builder = agent.stream_builder(1);
+        builder.set_port_range(self.settings.ice_port_start, self.settings.ice_port_end);
+        let mut stream = match builder.build() {
             Ok(stream) => stream,
             Err(err) => {
                 return stream::once(Err(io::Error::new(io::ErrorKind::Other, err).into()));
@@ -350,7 +371,7 @@ impl Connection {
     fn process_packet_from_client(
         &mut self,
         packet: ControlPacket<Serverbound>,
-    ) -> Box<Stream<Item = Frame, Error = Error>> {
+    ) -> Box<dyn Stream<Item = Frame, Error = Error>> {
         match packet {
             ControlPacket::Authenticate(mut message) => {
                 println!("MSG Authenticate: {:?}", message);

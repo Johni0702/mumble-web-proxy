@@ -1,4 +1,3 @@
-#![feature(try_from)]
 // TODO For some reason, reconnecting without reloading the page and without disconnecting the
 //      previous connection (i.e. multiple simultaneous connections) causes FF to reject our DTLS
 //      cert. Works in Chrome, or in different tabs or when properly closing the old connection.
@@ -32,6 +31,7 @@ use std::convert::Into;
 use std::convert::TryInto;
 use std::net::Ipv6Addr;
 use std::net::ToSocketAddrs;
+use std::rc::Rc;
 use tokio::net::TcpListener;
 use tokio::net::TcpStream;
 use tokio_codec::Decoder;
@@ -45,13 +45,15 @@ use tungstenite::protocol::WebSocketConfig;
 mod connection;
 mod error;
 mod utils;
-use connection::Connection;
+use connection::{ConnectionSettings, Connection};
 use error::Error;
 
 fn main() {
     let mut ws_port = 0_u16;
     let mut upstream = "".to_string();
     let mut accept_invalid_certs = false;
+    let mut settings = Rc::new(ConnectionSettings::new());
+    let settings_mut = Rc::get_mut(&mut settings).unwrap();
 
     {
         let mut ap = ArgumentParser::new();
@@ -70,12 +72,25 @@ fn main() {
                 "Hostname and (optionally) port of the upstream Mumble server",
             )
             .required();
-        ap.refer(&mut accept_invalid_certs).add_option(
-            &["--accept-invalid-certificate"],
-            StoreTrue,
-            "Connect to upstream server even when its certificate is invalid.
-                 Only ever use this if know that your server is using a self-signed certificate!",
-        );
+        ap.refer(&mut accept_invalid_certs)
+            .add_option(
+                &["--accept-invalid-certificate"],
+                StoreTrue,
+                "Connect to upstream server even when its certificate is invalid.
+                     Only ever use this if know that your server is using a self-signed certificate!",
+            );
+        ap.refer(&mut settings_mut.ice_port_start)
+            .add_option(
+                &["--ice-start"],
+                Store,
+                "Start of port range for establishing connections",
+            );
+        ap.refer(&mut settings_mut.ice_port_end)
+            .add_option(
+                &["--ice-end"],
+                Store,
+                "End of port range for establishing connections",
+            );
         ap.parse_args_or_exit();
     }
 
@@ -137,6 +152,9 @@ fn main() {
         let client = accept_hdr_async_with_config(client, header_callback, Some(websocket_config))
             .from_err();
 
+        // Get settings copy.
+        let settings_copy = Rc::clone(&mut settings);
+
         // Once both are done, begin proxy duty
         let f = client
             .join(server)
@@ -164,7 +182,7 @@ fn main() {
                 let server_sink = server_sink.sink_from_err();
                 let server_stream = server_stream.from_err();
 
-                Connection::new(client_sink, client_stream, server_sink, server_stream)
+                Connection::new(client_sink, client_stream, server_sink, server_stream, settings_copy)
             })
             .or_else(move |err| {
                 if err.is_connection_closed() {

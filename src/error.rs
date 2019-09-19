@@ -7,7 +7,7 @@ pub enum Error {
     Io(std::io::Error),
     ServerTls(native_tls::Error),
     ClientConnection(tungstenite::Error),
-    Misc(Box<std::error::Error>),
+    Misc(Box<dyn std::error::Error>),
 }
 
 impl Error {
