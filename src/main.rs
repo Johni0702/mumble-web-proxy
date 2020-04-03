@@ -1,4 +1,3 @@
-#![feature(try_from)]
 // TODO For some reason, reconnecting without reloading the page and without disconnecting the
 //      previous connection (i.e. multiple simultaneous connections) causes FF to reject our DTLS
 //      cert. Works in Chrome, or in different tabs or when properly closing the old connection.
