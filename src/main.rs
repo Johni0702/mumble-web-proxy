@@ -1,23 +1,6 @@
 // TODO For some reason, reconnecting without reloading the page and without disconnecting the
 //      previous connection (i.e. multiple simultaneous connections) causes FF to reject our DTLS
 //      cert. Works in Chrome, or in different tabs or when properly closing the old connection.
-extern crate argparse;
-extern crate byteorder;
-extern crate bytes;
-extern crate futures;
-extern crate libnice;
-extern crate mumble_protocol;
-extern crate native_tls;
-extern crate openssl;
-extern crate rtp;
-extern crate tokio;
-extern crate tokio_codec;
-extern crate tokio_core;
-extern crate tokio_tls;
-extern crate tokio_tungstenite;
-extern crate tungstenite;
-extern crate webrtc_sdp;
-
 use argparse::StoreOption;
 use argparse::StoreTrue;
 use argparse::{ArgumentParser, Store};
