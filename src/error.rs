@@ -1,4 +1,4 @@
-use futures::sync::mpsc;
+use futures::channel::mpsc;
 
 // FIXME clean this up
 
@@ -7,13 +7,13 @@ pub enum Error {
     Io(std::io::Error),
     ServerTls(native_tls::Error),
     ClientConnection(tungstenite::Error),
-    Misc(Box<dyn std::error::Error>),
+    Misc(Box<dyn std::error::Error + Send>),
 }
 
 impl Error {
     pub fn is_connection_closed(&self) -> bool {
         match self {
-            Error::ClientConnection(tungstenite::Error::ConnectionClosed(_)) => true,
+            Error::ClientConnection(tungstenite::Error::ConnectionClosed) => true,
             _ => false,
         }
     }
@@ -37,8 +37,8 @@ impl From<native_tls::Error> for Error {
     }
 }
 
-impl From<tokio::timer::Error> for Error {
-    fn from(e: tokio::timer::Error) -> Self {
+impl From<tokio::time::Error> for Error {
+    fn from(e: tokio::time::Error) -> Self {
         Error::Misc(Box::new(e))
     }
 }
@@ -55,8 +55,8 @@ impl From<()> for Error {
     }
 }
 
-impl<T> From<mpsc::SendError<T>> for Error {
-    fn from(_: mpsc::SendError<T>) -> Self {
+impl From<mpsc::SendError> for Error {
+    fn from(_: mpsc::SendError) -> Self {
         panic!();
     }
 }

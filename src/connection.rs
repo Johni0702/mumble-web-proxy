@@ -1,5 +1,10 @@
+use futures::future;
+use futures::future::BoxFuture;
+use futures::pin_mut;
+use futures::ready;
 use futures::stream;
-use futures::{Future, Sink, Stream};
+use futures::stream::BoxStream;
+use futures::{Future, FutureExt, Sink, Stream, StreamExt};
 use libnice::ice;
 use mumble_protocol::control::msgs;
 use mumble_protocol::control::ControlPacket;
@@ -18,15 +23,18 @@ use rtp::rfc3550::{
     RtpPacketReader, RtpPacketWriter,
 };
 use rtp::rfc5761::{MuxPacketReader, MuxPacketWriter, MuxedPacket};
-use rtp::rfc5764::{DtlsSrtp, DtlsSrtpHandshakeResult};
+use rtp::rfc5764::DtlsSrtp;
 use rtp::traits::{ReadPacket, WritePacket};
 use std::collections::BTreeMap;
 use std::ffi::CString;
 use std::net::IpAddr;
-use std::time::{Duration, Instant};
+use std::ops::DerefMut;
+use std::pin::Pin;
+use std::task::Context;
+use std::task::Poll;
+use std::time::Duration;
 use tokio::io;
-use tokio::prelude::*;
-use tokio::timer::Delay;
+use tokio::time::Delay;
 use webrtc_sdp::attribute_type::SdpAttribute;
 
 use crate::error::Error;
@@ -46,7 +54,7 @@ struct User {
 }
 
 impl User {
-    fn set_inactive(&mut self) -> impl Stream<Item = Frame, Error = Error> {
+    fn set_inactive(&mut self) -> impl Stream<Item = Result<Frame, Error>> {
         self.timeout = None;
 
         if self.active {
@@ -60,15 +68,14 @@ impl User {
 
             let mut msg = msgs::TalkingState::new();
             msg.set_session(self.session);
-            EitherS::A(stream::once(Ok(Frame::Client(msg.into()))))
+            EitherS::A(stream::once(future::ready(Ok(Frame::Client(msg.into())))))
         } else {
             EitherS::B(stream::empty())
         }
     }
 
-    fn set_active(&mut self, target: u8) -> impl Stream<Item = Frame, Error = Error> {
-        let when = Instant::now() + Duration::from_millis(400);
-        self.timeout = Some(Delay::new(when));
+    fn set_active(&mut self, target: u8) -> impl Stream<Item = Result<Frame, Error>> {
+        self.timeout = Some(tokio::time::delay_for(Duration::from_millis(400)));
 
         if self.active {
             EitherS::A(stream::empty())
@@ -78,25 +85,28 @@ impl User {
             let mut msg = msgs::TalkingState::new();
             msg.set_session(self.session);
             msg.set_target(target.into());
-            EitherS::B(stream::once(Ok(Frame::Client(msg.into()))))
+            EitherS::B(stream::once(future::ready(Ok(Frame::Client(msg.into())))))
         }
     }
 }
 
 pub struct Connection {
     config: Config,
-    inbound_client: Box<dyn Stream<Item = ControlPacket<Serverbound>, Error = Error>>,
-    outbound_client: Box<dyn Sink<SinkItem = ControlPacket<Clientbound>, SinkError = Error>>,
-    inbound_server: Box<dyn Stream<Item = ControlPacket<Clientbound>, Error = Error>>,
-    outbound_server: Box<dyn Sink<SinkItem = ControlPacket<Serverbound>, SinkError = Error>>,
+    inbound_client: Pin<Box<dyn Stream<Item = Result<ControlPacket<Serverbound>, Error>> + Send>>,
+    outbound_client: Pin<Box<dyn Sink<ControlPacket<Clientbound>, Error = Error> + Send>>,
+    inbound_server: Pin<Box<dyn Stream<Item = Result<ControlPacket<Clientbound>, Error>> + Send>>,
+    outbound_server: Pin<Box<dyn Sink<ControlPacket<Serverbound>, Error = Error> + Send>>,
     next_clientbound_frame: Option<ControlPacket<Clientbound>>,
     next_serverbound_frame: Option<ControlPacket<Serverbound>>,
     next_rtp_frame: Option<Vec<u8>>,
-    stream_to_be_sent: Option<Box<dyn Stream<Item = Frame, Error = Error>>>,
+    stream_to_be_sent: Option<BoxStream<'static, Result<Frame, Error>>>,
 
     ice: Option<(ice::Agent, ice::Stream)>,
+    candidate_gathering_done: bool,
 
-    dtls_srtp_future: Option<DtlsSrtpHandshakeResult<ice::StreamComponent, SslAcceptorBuilder>>,
+    dtls_srtp_future: Option<
+        BoxFuture<'static, Result<DtlsSrtp<ice::StreamComponent, SslAcceptorBuilder>, io::Error>>,
+    >,
     dtls_srtp: Option<DtlsSrtp<ice::StreamComponent, SslAcceptorBuilder>>,
     dtls_key: PKey<Private>,
     dtls_cert: X509,
@@ -119,10 +129,10 @@ impl Connection {
         server_stream: SSt,
     ) -> Self
     where
-        CSi: Sink<SinkItem = ControlPacket<Clientbound>, SinkError = Error> + 'static,
-        CSt: Stream<Item = ControlPacket<Serverbound>, Error = Error> + 'static,
-        SSi: Sink<SinkItem = ControlPacket<Serverbound>, SinkError = Error> + 'static,
-        SSt: Stream<Item = ControlPacket<Clientbound>, Error = Error> + 'static,
+        CSi: Sink<ControlPacket<Clientbound>, Error = Error> + 'static + Send,
+        CSt: Stream<Item = Result<ControlPacket<Serverbound>, Error>> + 'static + Send,
+        SSi: Sink<ControlPacket<Serverbound>, Error = Error> + 'static + Send,
+        SSt: Stream<Item = Result<ControlPacket<Clientbound>, Error>> + 'static + Send,
     {
         let rsa = Rsa::generate(2048).unwrap();
         let key = PKey::from_rsa(rsa).unwrap();
@@ -140,15 +150,16 @@ impl Connection {
 
         Self {
             config,
-            inbound_client: Box::new(client_stream),
-            outbound_client: Box::new(client_sink),
-            inbound_server: Box::new(server_stream),
-            outbound_server: Box::new(server_sink),
+            inbound_client: Box::pin(client_stream),
+            outbound_client: Box::pin(client_sink),
+            inbound_server: Box::pin(server_stream),
+            outbound_server: Box::pin(server_sink),
             next_clientbound_frame: None,
             next_serverbound_frame: None,
             next_rtp_frame: None,
             stream_to_be_sent: None,
             ice: None,
+            candidate_gathering_done: false,
             dtls_srtp_future: None,
             dtls_srtp: None,
             dtls_key: key,
@@ -195,7 +206,7 @@ impl Connection {
         }
     }
 
-    fn setup_ice(&mut self) -> impl Stream<Item = Frame, Error = Error> {
+    fn setup_ice(&mut self) -> impl Stream<Item = Result<Frame, Error>> {
         // Setup ICE agent
         let mut agent = ice::Agent::new_rfc5245();
         agent.set_software("mumble-web-proxy");
@@ -211,7 +222,11 @@ impl Connection {
         } {
             Ok(stream) => stream,
             Err(err) => {
-                return stream::once(Err(io::Error::new(io::ErrorKind::Other, err).into()));
+                return stream::once(future::ready(Err(io::Error::new(
+                    io::ErrorKind::Other,
+                    err,
+                )
+                .into())));
             }
         };
         let component = stream.take_components().pop().expect("one component");
@@ -238,15 +253,55 @@ impl Connection {
         acceptor.set_certificate(&self.dtls_cert).unwrap();
         acceptor.set_private_key(&self.dtls_key).unwrap();
         // FIXME: verify remote fingerprint
-        self.dtls_srtp_future = Some(DtlsSrtp::handshake(component, acceptor));
+        self.dtls_srtp_future = Some(DtlsSrtp::handshake(component, acceptor).boxed());
 
-        stream::once(Ok(Frame::Client(msg.into())))
+        stream::once(future::ready(Ok(Frame::Client(msg.into()))))
+    }
+
+    fn gather_ice_candidates(mut self: Pin<&mut Self>, cx: &mut Context) -> bool {
+        if self.candidate_gathering_done {
+            return false;
+        }
+        let stream = match self.ice {
+            Some((_, ref mut stream)) => stream,
+            None => return false,
+        };
+        pin_mut!(stream);
+        match stream.poll_next(cx) {
+            Poll::Ready(Some(mut candidate)) => {
+                println!("Local ice candidate: {}", candidate.to_string());
+
+                // Map to public addresses (if configured)
+                let config = &self.config;
+                match (&mut candidate.address, config.public_v4, config.public_v6) {
+                    (webrtc_sdp::address::Address::Ip(IpAddr::V4(addr)), Some(public), _) => {
+                        *addr = public;
+                    }
+                    (webrtc_sdp::address::Address::Ip(IpAddr::V6(addr)), _, Some(public)) => {
+                        *addr = public;
+                    }
+                    _ => {} // non configured
+                };
+
+                // Got a new candidate, send it to the client
+                let mut msg = msgs::IceCandidate::new();
+                msg.set_content(format!("candidate:{}", candidate.to_string()));
+                let frame = Frame::Client(msg.into());
+                self.stream_to_be_sent = Some(Box::pin(stream::once(future::ready(Ok(frame)))));
+                true
+            }
+            Poll::Ready(None) => {
+                self.candidate_gathering_done = true;
+                false
+            }
+            _ => false,
+        }
     }
 
     fn handle_voice_packet(
         &mut self,
         packet: VoicePacket<Clientbound>,
-    ) -> impl Stream<Item = Frame, Error = Error> {
+    ) -> impl Stream<Item = Result<Frame, Error>> {
         let (target, session_id, seq_num, opus_data, last_bit) = match packet {
             VoicePacket::Audio {
                 target,
@@ -338,15 +393,15 @@ impl Connection {
             padding: Vec::new(),
         };
         let frame = Frame::Rtp(MuxedPacket::Rtp(rtp));
-        EitherS::A(activity_stream.chain(stream::once(Ok(frame))))
+        EitherS::A(activity_stream.chain(stream::once(future::ready(Ok(frame)))))
     }
 
     fn process_packet_from_server(
         &mut self,
         packet: ControlPacket<Clientbound>,
-    ) -> impl Stream<Item = Frame, Error = Error> {
+    ) -> impl Stream<Item = Result<Frame, Error>> {
         if !self.supports_webrtc() {
-            return EitherS::B(stream::once(Ok(Frame::Client(packet))));
+            return EitherS::B(stream::once(future::ready(Ok(Frame::Client(packet)))));
         }
         match packet {
             ControlPacket::UDPTunnel(voice) => EitherS::A(self.handle_voice_packet(*voice)),
@@ -356,20 +411,24 @@ impl Connection {
                     let user = self.allocate_ssrc(session_id);
                     message.set_ssrc(user.ssrc);
                 }
-                EitherS::B(stream::once(Ok(Frame::Client((*message).into()))))
+                EitherS::B(stream::once(future::ready(Ok(Frame::Client(
+                    (*message).into(),
+                )))))
             }
             ControlPacket::UserRemove(message) => {
                 self.free_ssrc(message.get_session());
-                EitherS::B(stream::once(Ok(Frame::Client((*message).into()))))
+                EitherS::B(stream::once(future::ready(Ok(Frame::Client(
+                    (*message).into(),
+                )))))
             }
-            other => EitherS::B(stream::once(Ok(Frame::Client(other)))),
+            other => EitherS::B(stream::once(future::ready(Ok(Frame::Client(other))))),
         }
     }
 
     fn process_packet_from_client(
         &mut self,
         packet: ControlPacket<Serverbound>,
-    ) -> Box<dyn Stream<Item = Frame, Error = Error>> {
+    ) -> Pin<Box<dyn Stream<Item = Result<Frame, Error>> + Send>> {
         match packet {
             ControlPacket::Authenticate(mut message) => {
                 println!("MSG Authenticate: {:?}", message);
@@ -381,9 +440,14 @@ impl Connection {
 
                     let stream = self.setup_ice();
 
-                    Box::new(stream::once(Ok(Frame::Server((*message).into()))).chain(stream))
+                    Box::pin(
+                        stream::once(future::ready(Ok(Frame::Server((*message).into()))))
+                            .chain(stream),
+                    )
                 } else {
-                    Box::new(stream::once(Ok(Frame::Server((*message).into()))))
+                    Box::pin(stream::once(future::ready(Ok(Frame::Server(
+                        (*message).into(),
+                    )))))
                 }
             }
             ControlPacket::WebRTC(mut message) => {
@@ -398,7 +462,7 @@ impl Connection {
                     // FIXME trigger ICE-restart if required
                     // FIXME store and use remote dtls fingerprint
                 }
-                Box::new(stream::empty())
+                Box::pin(stream::empty())
             }
             ControlPacket::IceCandidate(mut message) => {
                 let candidate = message.take_content();
@@ -410,15 +474,15 @@ impl Connection {
                         }
                         Ok(_) => unreachable!(),
                         Err(err) => {
-                            return Box::new(stream::once(Err(io::Error::new(
+                            return Box::pin(stream::once(future::ready(Err(io::Error::new(
                                 io::ErrorKind::Other,
                                 format!("Error parsing ICE candidate: {}", err),
                             )
-                            .into())));
+                            .into()))));
                         }
                     }
                 }
-                Box::new(stream::empty())
+                Box::pin(stream::empty())
             }
             ControlPacket::TalkingState(message) => {
                 self.target = if message.has_target() {
@@ -426,14 +490,14 @@ impl Connection {
                 } else {
                     None
                 };
-                Box::new(stream::empty())
+                Box::pin(stream::empty())
             }
-            other => Box::new(stream::once(Ok(Frame::Server(other)))),
+            other => Box::pin(stream::once(future::ready(Ok(Frame::Server(other))))),
         }
     }
 
-    fn process_rtp_packet(&mut self, buf: &[u8]) -> impl Stream<Item = Frame, Error = Error> {
-        stream::iter_result(match self.rtp_reader.read_packet(&mut &buf[..]) {
+    fn process_rtp_packet(&mut self, buf: &[u8]) -> impl Stream<Item = Result<Frame, Error>> {
+        match self.rtp_reader.read_packet(&mut &buf[..]) {
             Ok(MuxedPacket::Rtp(rtp)) => {
                 if let Some(target) = self.target {
                     // FIXME derive mumble seq_num from rtp timestamp to properly handle
@@ -449,66 +513,65 @@ impl Connection {
                         position_info: None,
                     };
 
-                    Some(Ok(Frame::Server(voice_packet.into())))
+                    EitherS::A(stream::once(future::ready(Ok(Frame::Server(
+                        voice_packet.into(),
+                    )))))
                 } else {
-                    None
+                    EitherS::B(stream::empty())
                 }
             }
-            Ok(MuxedPacket::Rtcp(_rtcp)) => None,
-            Err(_err) => None, // FIXME maybe not silently drop the error?
-        })
+            Ok(MuxedPacket::Rtcp(_rtcp)) => EitherS::B(stream::empty()),
+            Err(_err) => EitherS::B(stream::empty()), // FIXME maybe not silently drop the error?
+        }
     }
 }
 
 impl Future for Connection {
-    type Item = ();
-    type Error = Error;
+    type Output = Result<(), Error>;
 
-    fn poll(&mut self) -> Poll<(), Error> {
+    fn poll(mut self: Pin<&mut Self>, cx: &mut Context) -> Poll<Result<(), Error>> {
         'poll: loop {
-            if let Some((agent, _)) = &mut self.ice {
-                agent.poll()?;
+            if let Some((ref mut agent, _)) = self.ice {
+                pin_mut!(agent);
+                let _ = agent.poll(cx);
             }
 
             // If there's a frame pending to be sent, sent it before everything else
-            if let Some(frame) = self.next_serverbound_frame.take() {
-                match self.outbound_server.start_send(frame)? {
-                    AsyncSink::NotReady(frame) => {
-                        self.next_serverbound_frame = Some(frame);
-                        return Ok(Async::NotReady);
-                    }
-                    AsyncSink::Ready => {}
-                }
+            if self.next_serverbound_frame.is_some() {
+                ready!(self.outbound_server.as_mut().poll_ready(cx)?);
+                let frame = self.next_serverbound_frame.take().unwrap();
+                self.outbound_server.as_mut().start_send(frame)?;
             }
-            if let Some(frame) = self.next_clientbound_frame.take() {
-                match self.outbound_client.start_send(frame)? {
-                    AsyncSink::NotReady(frame) => {
-                        self.next_clientbound_frame = Some(frame);
-                        return Ok(Async::NotReady);
-                    }
-                    AsyncSink::Ready => {}
-                }
+            if self.next_clientbound_frame.is_some() {
+                ready!(self.outbound_client.as_mut().poll_ready(cx)?);
+                let frame = self.next_clientbound_frame.take().unwrap();
+                self.outbound_client.as_mut().start_send(frame)?;
             }
             if let Some(frame) = self.next_rtp_frame.take() {
                 if let Some(ref mut dtls_srtp) = self.dtls_srtp {
-                    match dtls_srtp.start_send(frame)? {
-                        AsyncSink::NotReady(frame) => {
+                    pin_mut!(dtls_srtp);
+                    match dtls_srtp.as_mut().poll_ready(cx)? {
+                        Poll::Pending => {
                             self.next_rtp_frame = Some(frame);
-                            return Ok(Async::NotReady);
                         }
-                        AsyncSink::Ready => {}
+                        Poll::Ready(()) => {
+                            dtls_srtp.as_mut().start_send(&frame)?;
+                        }
                     }
                 } else {
                     // RTP not yet setup, just drop the frame
+                    self.next_rtp_frame = None;
                 }
             }
 
             // Send out all pending frames
             if self.stream_to_be_sent.is_some() {
-                match self.stream_to_be_sent.as_mut().unwrap().poll()? {
-                    Async::NotReady => return Ok(Async::NotReady),
-                    Async::Ready(Some(frame)) => {
-                        match frame {
+                let mut stream = self.stream_to_be_sent.as_mut().unwrap();
+                let stream = stream.deref_mut();
+                pin_mut!(stream);
+                match ready!(stream.poll_next(cx)) {
+                    Some(frame) => {
+                        match frame? {
                             Frame::Server(frame) => self.next_serverbound_frame = Some(frame),
                             Frame::Client(frame) => self.next_clientbound_frame = Some(frame),
                             Frame::Rtp(frame) => {
@@ -519,17 +582,17 @@ impl Future for Connection {
                         }
                         continue 'poll;
                     }
-                    Async::Ready(None) => {
+                    None => {
                         self.stream_to_be_sent = None;
                     }
                 }
             }
 
             // All frames have been sent (or queued), flush any buffers in the output path
-            self.outbound_client.poll_complete()?;
-            self.outbound_server.poll_complete()?;
+            let _ = self.outbound_client.as_mut().poll_flush(cx)?;
+            let _ = self.outbound_server.as_mut().poll_flush(cx)?;
             if let Some(ref mut dtls_srtp) = self.dtls_srtp {
-                dtls_srtp.poll_complete()?;
+                let _ = Pin::new(dtls_srtp).poll_flush(cx)?;
             }
 
             // Check/register voice timeouts
@@ -541,83 +604,69 @@ impl Future for Connection {
             // anyway), hence this being positioned above the code for incoming packets below.
             // (same applies to the other futures directly below it)
             for session in self.sessions.values_mut() {
-                if let Async::Ready(Some(())) = session.timeout.poll()? {
-                    let stream = session.set_inactive();
-                    self.stream_to_be_sent = Some(Box::new(stream));
-                    continue 'poll;
+                if let Some(timeout) = &mut session.timeout {
+                    pin_mut!(timeout);
+                    if let Poll::Ready(()) = timeout.poll(cx) {
+                        let stream = session.set_inactive();
+                        self.stream_to_be_sent = Some(Box::pin(stream));
+                        continue 'poll;
+                    }
                 }
             }
 
             // Poll ice stream for new candidates
-            if let Some((_, stream)) = &mut self.ice {
-                if let Async::Ready(Some(mut candidate)) = stream.poll()? {
-                    println!("Local ice candidate: {}", candidate.to_string());
-
-                    // Map to public addresses (if configured)
-                    let config = &self.config;
-                    match (&mut candidate.address, config.public_v4, config.public_v6) {
-                        (IpAddr::V4(addr), Some(public), _) => {
-                            *addr = public;
-                        }
-                        (IpAddr::V6(addr), _, Some(public)) => {
-                            *addr = public;
-                        }
-                        _ => {} // non configured
-                    };
-
-                    // Got a new candidate, send it to the client
-                    let mut msg = msgs::IceCandidate::new();
-                    msg.set_content(format!("candidate:{}", candidate.to_string()));
-                    let frame = Frame::Client(msg.into());
-                    self.stream_to_be_sent = Some(Box::new(stream::once(Ok(frame))));
-                    continue 'poll;
-                }
+            if self.as_mut().gather_ice_candidates(cx) {
+                continue 'poll;
             }
 
             // Poll dtls_srtp future if required
-            if let Async::Ready(Some(mut dtls_srtp)) = self.dtls_srtp_future.poll()? {
-                self.dtls_srtp_future = None;
+            if let Some(ref mut future) = self.dtls_srtp_future {
+                pin_mut!(future);
+                if let Poll::Ready(mut dtls_srtp) = future.poll(cx)? {
+                    self.dtls_srtp_future = None;
 
-                println!("DTLS-SRTP connection established.");
+                    println!("DTLS-SRTP connection established.");
 
-                dtls_srtp.add_incoming_unknown_ssrcs(self.next_ssrc as usize);
-                dtls_srtp.add_outgoing_unknown_ssrcs(self.next_ssrc as usize);
+                    dtls_srtp.add_incoming_unknown_ssrcs(self.next_ssrc as usize);
+                    dtls_srtp.add_outgoing_unknown_ssrcs(self.next_ssrc as usize);
 
-                self.dtls_srtp = Some(dtls_srtp);
+                    self.dtls_srtp = Some(dtls_srtp);
+                }
             }
 
             // Finally check for incoming packets
-            match self.inbound_server.poll()? {
-                Async::NotReady => {}
-                Async::Ready(Some(frame)) => {
+            match self.inbound_server.as_mut().poll_next(cx)? {
+                Poll::Pending => {}
+                Poll::Ready(Some(frame)) => {
                     let stream = self.process_packet_from_server(frame);
-                    self.stream_to_be_sent = Some(Box::new(stream));
+                    self.stream_to_be_sent = Some(Box::pin(stream));
                     continue 'poll;
                 }
-                Async::Ready(None) => return Ok(Async::Ready(())),
+                Poll::Ready(None) => return Poll::Ready(Ok(())),
             }
-            match self.inbound_client.poll()? {
-                Async::NotReady => {}
-                Async::Ready(Some(frame)) => {
+            match self.inbound_client.as_mut().poll_next(cx)? {
+                Poll::Pending => {}
+                Poll::Ready(Some(frame)) => {
                     let stream = self.process_packet_from_client(frame);
-                    self.stream_to_be_sent = Some(Box::new(stream));
+                    self.stream_to_be_sent = Some(stream);
                     continue 'poll;
                 }
-                Async::Ready(None) => return Ok(Async::Ready(())),
+                Poll::Ready(None) => return Poll::Ready(Ok(())),
             }
-            if self.dtls_srtp.is_some() {
-                match self.dtls_srtp.as_mut().unwrap().poll()? {
-                    Async::NotReady => {}
-                    Async::Ready(Some(frame)) => {
+            if let Some(ref mut dtls_srtp) = self.dtls_srtp {
+                pin_mut!(dtls_srtp);
+                match dtls_srtp.poll_next(cx)? {
+                    Poll::Pending => {}
+                    Poll::Ready(Some(frame)) => {
                         let stream = self.process_rtp_packet(&frame);
-                        self.stream_to_be_sent = Some(Box::new(stream));
+                        self.stream_to_be_sent = Some(Box::pin(stream));
                         continue 'poll;
                     }
-                    Async::Ready(None) => return Ok(Async::Ready(())),
+                    Poll::Ready(None) => return Poll::Ready(Ok(())),
                 }
             }
 
-            return Ok(Async::NotReady);
+            return Poll::Pending;
         }
     }
 }

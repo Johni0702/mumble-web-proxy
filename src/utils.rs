@@ -1,5 +1,7 @@
+use futures::pin_mut;
 use futures::Stream;
-use tokio::prelude::*;
+use std::pin::Pin;
+use std::task::{Context, Poll};
 
 /// Like `futures::future::Either` but for Streams
 pub enum EitherS<A, B> {
@@ -9,15 +11,20 @@ pub enum EitherS<A, B> {
 
 impl<A, B> Stream for EitherS<A, B>
 where
-    A: Stream,
-    B: Stream<Item = A::Item, Error = A::Error>,
+    A: Stream + Unpin,
+    B: Stream<Item = A::Item> + Unpin,
 {
     type Item = A::Item;
-    type Error = A::Error;
-    fn poll(&mut self) -> Result<Async<Option<Self::Item>>, Self::Error> {
-        match self {
-            EitherS::A(s) => s.poll(),
-            EitherS::B(s) => s.poll(),
+    fn poll_next(self: Pin<&mut Self>, cx: &mut Context) -> Poll<Option<Self::Item>> {
+        match self.get_mut() {
+            EitherS::A(s) => {
+                pin_mut!(s);
+                s.poll_next(cx)
+            }
+            EitherS::B(s) => {
+                pin_mut!(s);
+                s.poll_next(cx)
+            }
         }
     }
 }
