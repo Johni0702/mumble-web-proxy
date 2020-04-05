@@ -13,7 +13,7 @@ Note that it requires an extension to the Mumble protocol which has not yet been
 
 #### Prerequisites
 
-- Moderately recent Rust Nightly (e.g. via [rustup](https://rustup.rs/))
+- Rust 1.39+ (e.g. via [rustup](https://rustup.rs/))
 - libnice development headers (`libnice-devel` on Fedora, `libnice-dev` on Debian)
 - clang (`clang` on Fedora and Debian)
 
