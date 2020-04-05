@@ -28,7 +28,6 @@ use tungstenite::protocol::WebSocketConfig;
 
 mod connection;
 mod error;
-mod utils;
 use connection::Connection;
 use error::Error;
 
