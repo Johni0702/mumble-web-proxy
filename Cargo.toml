@@ -21,3 +21,6 @@ rtp = { git = "https://github.com/johni0702/rtp", rev = "1444b3c", features = ["
 libnice = "0.2"
 webrtc-sdp = "0.3"
 openssl = "0.10"
+
+[replace]
+"rust-crypto:0.2.36" = { git = "https://github.com/awmath/rust-crypto.git", branch = "avx2" }
