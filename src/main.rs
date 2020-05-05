@@ -14,6 +14,7 @@ use mumble_protocol::control::RawControlPacket;
 use mumble_protocol::Clientbound;
 use std::convert::Into;
 use std::convert::TryInto;
+use std::io::ErrorKind;
 use std::net::Ipv4Addr;
 use std::net::Ipv6Addr;
 use std::net::ToSocketAddrs;
@@ -121,7 +122,15 @@ async fn main() -> Result<(), Error> {
     let mut server = TcpListener::bind(&socket_addr).await?;
     loop {
         let (client, _) = server.accept().await?;
-        let addr = client.peer_addr().expect("peer to have an address");
+        let addr = match client.peer_addr() {
+            Ok(addr) => addr,
+            Err(err) => {
+                if err.kind() != ErrorKind::NotConnected {
+                    println!("Error getting address of new connection: {:?}", err);
+                }
+                continue;
+            }
+        };
         println!("New connection from {}", addr);
 
         // Connect to server
