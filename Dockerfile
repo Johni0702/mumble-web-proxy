@@ -12,7 +12,7 @@ RUN cargo install --path .
 # Bundle Stage
 FROM rust:1.43.1-slim AS bundle
 WORKDIR /app
-RUN apt-get update && apt-get install -y libnice-dev libnice10 libglib2.0 && apt-get -qq clean
+RUN apt-get update && apt-get install -y libnice10 libglib2.0 && apt-get -qq clean
 
 COPY --from=builder /usr/local/cargo/bin/mumble-web-proxy .
 COPY docker/start.sh .
