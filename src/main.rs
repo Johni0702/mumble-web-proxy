@@ -169,14 +169,19 @@ async fn main() -> Result<(), Error> {
         }
     };
     let upstream_host = Box::leak(Box::new(upstream_host.to_owned())).as_str();
+    println!("Resolving upstream address {:?}", (upstream_host, upstream_port));
     let upstream_addr = (upstream_host, upstream_port)
         .to_socket_addrs()
         .expect("Failed to parse upstream address")
         .next()
         .expect("Failed to resolve upstream address");
+    println!("Resolved upstream address: {}", upstream_addr);
 
+    println!("Binding to port {}", ws_port);
     let socket_addr = (Ipv6Addr::from(0), ws_port);
     let mut server = TcpListener::bind(&socket_addr).await?;
+
+    println!("Waiting for client connections..");
     loop {
         let (client, _) = server.accept().await?;
         let addr = match client.peer_addr() {
