@@ -12,6 +12,7 @@ use mumble_protocol::control::ClientControlCodec;
 use mumble_protocol::control::ControlPacket;
 use mumble_protocol::control::RawControlPacket;
 use mumble_protocol::Clientbound;
+use serde::Deserialize;
 use std::convert::Into;
 use std::convert::TryInto;
 use std::io::ErrorKind;
@@ -32,71 +33,127 @@ mod error;
 use connection::Connection;
 use error::Error;
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Deserialize)]
+#[serde(default, rename_all = "kebab-case")]
 pub struct Config {
-    pub min_port: u16,
-    pub max_port: u16,
-    pub public_v4: Option<Ipv4Addr>,
-    pub public_v6: Option<Ipv6Addr>,
+    pub file: Option<String>,
+    #[serde(rename = "listen-ws")]
+    pub ws_port: u16,
+    #[serde(rename = "server")]
+    pub upstream: String,
+    #[serde(rename = "accept-invalid-certificate")]
+    pub accept_invalid_certs: bool,
+    pub ice_min_port: u16,
+    pub ice_max_port: u16,
+    pub ice_public_v4: Option<Ipv4Addr>,
+    pub ice_public_v6: Option<Ipv6Addr>,
+}
+
+impl Default for Config {
+    fn default() -> Config {
+        Config {
+            file: None,
+            ws_port: 0_u16,
+            upstream: "".to_string(),
+            accept_invalid_certs: false,
+            ice_min_port: 1,
+            ice_max_port: u16::max_value(),
+            ice_public_v4: None,
+            ice_public_v6: None,
+        }
+    }
+}
+
+fn create_argparser(config: &mut Config) -> ArgumentParser {
+    let mut ap = ArgumentParser::new();
+    ap.set_description("Run the Mumble-WebRTC proxy");
+    ap.refer(&mut config.file).add_option(
+        &["--config"],
+        StoreOption,
+        "Toml file to read options from",
+    );
+    ap.refer(&mut config.ws_port).add_option(
+        &["--listen-ws"],
+        Store,
+        "Port to listen for WebSocket (non TLS) connections on",
+    );
+    ap.refer(&mut config.upstream).add_option(
+        &["--server"],
+        Store,
+        "Hostname and (optionally) port of the upstream Mumble server",
+    );
+    ap.refer(&mut config.accept_invalid_certs).add_option(
+        &["--accept-invalid-certificate"],
+        StoreTrue,
+        "Connect to upstream server even when its certificate is invalid.
+                 Only ever use this if know that your server is using a self-signed certificate!",
+    );
+    ap.refer(&mut config.ice_min_port).add_option(
+        &["--ice-port-min"],
+        Store,
+        "Minimum port number to use for ICE host candidates.",
+    );
+    ap.refer(&mut config.ice_max_port).add_option(
+        &["--ice-port-max"],
+        Store,
+        "Maximum port number to use for ICE host candidates.",
+    );
+    ap.refer(&mut config.ice_public_v4).add_option(
+        &["--ice-ipv4"],
+        StoreOption,
+        "Set a public IPv4 address to be used for ICE host candidates.",
+    );
+    ap.refer(&mut config.ice_public_v6).add_option(
+        &["--ice-ipv6"],
+        StoreOption,
+        "Set a public IPv6 address to be used for ICE host candidates.",
+    );
+    ap
+}
+
+fn error_missing_arg(arg: &str) {
+    let args: Vec<String> = std::env::args().collect();
+    let name = if args.len() > 0 {
+        &args[0][..]
+    } else {
+        "unknown"
+    };
+    let mut config = Config::default();
+    let ap = create_argparser(&mut config);
+    ap.error(
+        name,
+        &format!("Option [\"--{}\"] is required", arg),
+        &mut std::io::stderr(),
+    );
+    std::process::exit(2);
 }
 
 #[tokio::main]
 async fn main() -> Result<(), Error> {
-    let mut ws_port = 0_u16;
-    let mut upstream = "".to_string();
-    let mut accept_invalid_certs = false;
-    let mut config = Config {
-        min_port: 1,
-        max_port: u16::max_value(),
-        public_v4: None,
-        public_v6: None,
-    };
+    let mut config = Config::default();
 
-    {
-        let mut ap = ArgumentParser::new();
-        ap.set_description("Run the Mumble-WebRTC proxy");
-        ap.refer(&mut ws_port)
-            .add_option(
-                &["--listen-ws"],
-                Store,
-                "Port to listen for WebSocket (non TLS) connections on",
-            )
-            .required();
-        ap.refer(&mut upstream)
-            .add_option(
-                &["--server"],
-                Store,
-                "Hostname and (optionally) port of the upstream Mumble server",
-            )
-            .required();
-        ap.refer(&mut accept_invalid_certs).add_option(
-            &["--accept-invalid-certificate"],
-            StoreTrue,
-            "Connect to upstream server even when its certificate is invalid.
-                 Only ever use this if know that your server is using a self-signed certificate!",
-        );
-        ap.refer(&mut config.min_port).add_option(
-            &["--ice-port-min"],
-            Store,
-            "Minimum port number to use for ICE host candidates.",
-        );
-        ap.refer(&mut config.max_port).add_option(
-            &["--ice-port-max"],
-            Store,
-            "Maximum port number to use for ICE host candidates.",
-        );
-        ap.refer(&mut config.public_v4).add_option(
-            &["--ice-ipv4"],
-            StoreOption,
-            "Set a public IPv4 address to be used for ICE host candidates.",
-        );
-        ap.refer(&mut config.public_v6).add_option(
-            &["--ice-ipv6"],
-            StoreOption,
-            "Set a public IPv6 address to be used for ICE host candidates.",
-        );
-        ap.parse_args_or_exit();
+    // First pass to get the config file path
+    create_argparser(&mut config).parse_args_or_exit();
+    if let Some(file) = config.file {
+        // Then read in the config defaults
+        config = toml::from_str(&std::fs::read_to_string(file)?)?;
+        // Second pass to allow for overwrites
+        create_argparser(&mut config).parse_args_or_exit();
     }
+
+    if config.ws_port == 0 {
+        error_missing_arg("listen-ws");
+    }
+    if config.upstream == "" {
+        error_missing_arg("server");
+    }
+
+    let Config {
+        ws_port,
+        upstream,
+        accept_invalid_certs,
+        ..
+    } = config.clone();
 
     // Try parsing as raw IPv6 address first
     let (upstream_host, upstream_port) = match upstream.parse::<Ipv6Addr>() {

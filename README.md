@@ -38,6 +38,12 @@ E.g. if you want the proxy to listen on port `64737` and connect to your Mumble 
 mumble-web-proxy --listen-ws 64737 --server mumbleserver:64738
 ```
 
+Instead of specifying all the options directly in the arguments, you can also use `--config <file>` to point mumble-web-proxy at a toml file which contains them:
+```
+listen-ws = 64737
+server = 'mumbleserver:64738'
+```
+
 #### Firewalls or NAT
 If your mumble-web-proxy is running behind a firewall or NAT, you need to allocate a range of ports to it which it can use for ICE connection establishment.
 ```

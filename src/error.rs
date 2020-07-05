@@ -49,6 +49,12 @@ impl From<rtp::Error> for Error {
     }
 }
 
+impl From<toml::de::Error> for Error {
+    fn from(e: toml::de::Error) -> Self {
+        Error::Misc(Box::new(e))
+    }
+}
+
 impl From<()> for Error {
     fn from(_: ()) -> Self {
         panic!();

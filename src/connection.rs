@@ -204,8 +204,8 @@ impl Connection {
         // Setup ICE stream
         let mut stream = match {
             let mut builder = agent.stream_builder(1);
-            if self.config.min_port != 1 || self.config.max_port != u16::max_value() {
-                builder.set_port_range(self.config.min_port, self.config.max_port);
+            if self.config.ice_min_port != 1 || self.config.ice_max_port != u16::max_value() {
+                builder.set_port_range(self.config.ice_min_port, self.config.ice_max_port);
             }
             builder.build()
         } {
@@ -259,7 +259,11 @@ impl Connection {
 
                 // Map to public addresses (if configured)
                 let config = &self.config;
-                match (&mut candidate.address, config.public_v4, config.public_v6) {
+                match (
+                    &mut candidate.address,
+                    config.ice_public_v4,
+                    config.ice_public_v6,
+                ) {
                     (webrtc_sdp::address::Address::Ip(IpAddr::V4(addr)), Some(public), _) => {
                         *addr = public;
                     }
