@@ -471,7 +471,13 @@ impl Connection {
     ) -> Result<(), Error> {
         match packet {
             ControlPacket::Authenticate(mut message) => {
-                println!("MSG Authenticate: {:?}", message);
+                println!("MSG Authenticate: {:?}", {
+                    let mut message = message.clone();
+                    if message.get_password() != "" {
+                        message.set_password("{{snip}}".to_string());
+                    }
+                    message
+                });
                 if message.get_webrtc() {
                     // strip webrtc support from the connection (we will be providing it)
                     message.clear_webrtc();
