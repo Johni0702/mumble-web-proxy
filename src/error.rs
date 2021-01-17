@@ -37,12 +37,6 @@ impl From<native_tls::Error> for Error {
     }
 }
 
-impl From<tokio::time::Error> for Error {
-    fn from(e: tokio::time::Error) -> Self {
-        Error::Misc(Box::new(e))
-    }
-}
-
 impl From<rtp::Error> for Error {
     fn from(e: rtp::Error) -> Self {
         Error::Misc(Box::new(e))

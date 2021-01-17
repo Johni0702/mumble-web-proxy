@@ -30,7 +30,7 @@ use std::task::Context;
 use std::task::Poll;
 use std::time::Duration;
 use tokio::io;
-use tokio::time::Delay;
+use tokio::time::Sleep;
 use webrtc_sdp::attribute_type::SdpAttribute;
 
 use crate::error::Error;
@@ -39,10 +39,10 @@ use crate::Config;
 type SessionId = u32;
 
 struct User {
-    session: u32,           // mumble session id
-    ssrc: u32,              // ssrc id
-    active: bool,           // whether the user is currently transmitting audio
-    timeout: Option<Delay>, // assume end of transmission if silent until then
+    session: u32,                     // mumble session id
+    ssrc: u32,                        // ssrc id
+    active: bool,                     // whether the user is currently transmitting audio
+    timeout: Option<Pin<Box<Sleep>>>, // assume end of transmission if silent until then
     start_voice_seq_num: u64,
     highest_voice_seq_num: u64,
     rtp_seq_num_offset: u32, // u32 because we also derive the timestamp from it
@@ -70,7 +70,7 @@ impl User {
     }
 
     fn set_active(&mut self, target: u8) -> Option<Frame> {
-        self.timeout = Some(tokio::time::delay_for(Duration::from_millis(400)));
+        self.timeout = Some(Box::pin(tokio::time::sleep(Duration::from_millis(400))));
 
         if self.active {
             None
@@ -587,8 +587,7 @@ impl Future for Connection {
             // (same applies to the other futures directly below it)
             for session in self.sessions.values_mut() {
                 if let Some(timeout) = &mut session.timeout {
-                    pin_mut!(timeout);
-                    if let Poll::Ready(()) = timeout.poll(cx) {
+                    if let Poll::Ready(()) = timeout.poll_unpin(cx) {
                         if let Some(frame) = session.set_inactive() {
                             self.outbound_buf.push_back(frame);
                         }

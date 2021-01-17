@@ -21,7 +21,7 @@ use std::net::Ipv6Addr;
 use std::net::ToSocketAddrs;
 use tokio::net::TcpListener;
 use tokio::net::TcpStream;
-use tokio_tls::TlsConnector;
+use tokio_native_tls::TlsConnector;
 use tokio_tungstenite::accept_hdr_async_with_config;
 use tokio_util::codec::Decoder;
 use tungstenite::handshake::server::{ErrorResponse, Request, Response};
@@ -179,7 +179,7 @@ async fn main() -> Result<(), Error> {
 
     println!("Binding to port {}", ws_port);
     let socket_addr = (Ipv6Addr::from(0), ws_port);
-    let mut server = TcpListener::bind(&socket_addr).await?;
+    let server = TcpListener::bind(&socket_addr).await?;
 
     println!("Waiting for client connections..");
     loop {
@@ -212,6 +212,7 @@ async fn main() -> Result<(), Error> {
             max_send_queue: Some(10), // can be fairly small as voice is using WebRTC instead
             max_message_size: Some(0x7f_ffff), // maximum size accepted by Murmur
             max_frame_size: Some(0x7f_ffff), // maximum size accepted by Murmur
+            accept_unmasked_frames: false, // browsers should comply with RFC 6455
         };
         fn header_callback(
             _req: &Request,

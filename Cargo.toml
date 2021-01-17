@@ -6,19 +6,19 @@ edition = "2018"
 
 [dependencies]
 argparse = "0.2.2"
-bytes = "0.5"
+bytes = "1"
 byteorder = "1.2"
 futures = { version = "0.3", features = ["compat", "io-compat"] }
 toml = "0.5"
 serde = { version = "1.0", features = ["derive"] }
-tokio = { version = "0.2", features = ["full"] }
-tokio-util = { version = "0.3", features = ["codec"] }
-tokio-tls = "0.3"
+tokio = { version = "1", features = ["full"] }
+tokio-util = { version = "0.6", features = ["codec"] }
+tokio-native-tls = "0.3"
 native-tls = "0.2"
-mumble-protocol = { version = "0.3", features = ["webrtc-extensions"] }
-tokio-tungstenite = "0.10"
+mumble-protocol = { version = "0.4", features = ["webrtc-extensions"] }
+tokio-tungstenite = "0.13"
 http = "0.2"
-tungstenite = "0.10"
+tungstenite = "0.12"
 rtp = { git = "https://github.com/johni0702/rtp", rev = "6c0223d", features = ["rfc5764-openssl"] }
 libnice = "0.3"
 webrtc-sdp = "0.3"
