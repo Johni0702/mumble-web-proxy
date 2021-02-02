@@ -1,5 +1,5 @@
 # Build Stage
-FROM rust:1.43.1-slim AS builder
+FROM rust:1.48-slim AS builder
 WORKDIR /usr/src/
 RUN apt-get update && apt-get install -y libnice-dev clang libssl-dev
 
@@ -10,7 +10,7 @@ COPY src ./src
 RUN cargo install --path .
 
 # Bundle Stage
-FROM rust:1.43.1-slim AS bundle
+FROM rust:1.48-slim AS bundle
 WORKDIR /app
 RUN apt-get update && apt-get install -y libnice10 libglib2.0 && apt-get -qq clean
 
