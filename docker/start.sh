@@ -2,6 +2,10 @@
 
 CMD="./mumble-web-proxy --listen-ws $LISTEN_WS --server $MUMBLE_SERVER"
 
+if [ -n "$ACCEPT_INVALID_CERT" ]; then
+  CMD="$CMD --accept-invalid-certificate"
+fi
+
 if [ -n "$ICE_PORT_MIN" ]; then
   CMD="$CMD --ice-port-min $ICE_PORT_MIN"
 fi
