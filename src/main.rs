@@ -16,9 +16,7 @@ use serde::Deserialize;
 use std::convert::Into;
 use std::convert::TryInto;
 use std::io::ErrorKind;
-use std::net::Ipv4Addr;
-use std::net::Ipv6Addr;
-use std::net::ToSocketAddrs;
+use std::net::{Ipv4Addr, Ipv6Addr, SocketAddr, ToSocketAddrs};
 use tokio::net::TcpListener;
 use tokio::net::TcpStream;
 use tokio_native_tls::TlsConnector;
@@ -178,8 +176,11 @@ async fn main() -> Result<(), Error> {
     println!("Resolved upstream address: {}", upstream_addr);
 
     println!("Binding to port {}", ws_port);
-    let socket_addr = (Ipv6Addr::from(0), ws_port);
-    let server = TcpListener::bind(&socket_addr).await?;
+    let ipv6_socket_addr = (Ipv6Addr::UNSPECIFIED, ws_port);
+    let ipv4_socket_addr = (Ipv4Addr::UNSPECIFIED, ws_port);
+    let socket_addrs = [SocketAddr::from(ipv6_socket_addr), SocketAddr::from(ipv4_socket_addr)];
+
+    let server = TcpListener::bind(&socket_addrs[..]).await?;
 
     println!("Waiting for client connections..");
     loop {
