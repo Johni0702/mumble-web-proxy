@@ -33,7 +33,7 @@ The final binary will be at `target/release/mumble-web-proxy`.
 
 mumble-web-proxy can only accept insecure websocket connections, so you will want to run it behind some web server which can terminate TLS. See [mumble-web]'s README for an example.
 
-Run `mumble-web-proxy --help` to see available options.
+Run `./mumble-web-proxy --help` to see available options.   (Make Sure you are in  `/mumble-web-proxy/target/release`)
 E.g. if you want the proxy to listen on port `64737` and connect to your Mumble server at `mumbleserver:64738`, run:
 ```
 mumble-web-proxy --listen-ws 64737 --server mumbleserver:64738
